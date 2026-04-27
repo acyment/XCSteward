@@ -1,0 +1,19 @@
+# Swift build artifacts
+.build/
+*.o
+*.swiftdeps
+*.dia
+*.d
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcworkspace
+*.xcuserdata
+
+# Logs
+log/*.log
+
+# dSYM
+*.dSYM/

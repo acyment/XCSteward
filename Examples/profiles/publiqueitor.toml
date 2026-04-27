@@ -1,0 +1,14 @@
+repo_root = "/Users/acyment/dev/Publiqueitor"
+project_path = "Publiqueitor.xcodeproj"
+scheme = "Publiqueitor-iOS"
+default_test_plan = "Stable"
+
+[managed_simulator]
+name = "Publiqueitor Test iPhone 17 Pro"
+device_type = "iPhone 17 Pro"
+runtime = "iOS 26.4"
+
+[timeouts]
+boot = 30
+build = 900
+test = 900
