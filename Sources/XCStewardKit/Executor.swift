@@ -1,128 +1,20 @@
 import Darwin
 import Foundation
 
-struct ExecutorContext {
-    let environment: AppEnvironment
-    let store: StateStore
-    let profile: ProjectProfile
-    let job: JobRecord
-}
-
-struct XCResultSummary: Decodable {
-    var testsCount: Int
-    var testsFailedCount: Int
-    var testsSkippedCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case testsCount
-        case testsFailedCount
-        case testsSkippedCount
-        case totalTestCount
-        case failedTests
-        case skippedTests
-    }
-
-    init(testsCount: Int, testsFailedCount: Int, testsSkippedCount: Int) {
-        self.testsCount = testsCount
-        self.testsFailedCount = testsFailedCount
-        self.testsSkippedCount = testsSkippedCount
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        if let testsCount = try container.decodeIfPresent(Int.self, forKey: .testsCount) {
-            self.testsCount = testsCount
-            self.testsFailedCount = try container.decodeIfPresent(Int.self, forKey: .testsFailedCount) ?? 0
-            self.testsSkippedCount = try container.decodeIfPresent(Int.self, forKey: .testsSkippedCount) ?? 0
-            return
-        }
-
-        if let totalTestCount = try container.decodeIfPresent(Int.self, forKey: .totalTestCount) {
-            self.testsCount = totalTestCount
-            self.testsFailedCount = try container.decodeIfPresent(Int.self, forKey: .failedTests) ?? 0
-            self.testsSkippedCount = try container.decodeIfPresent(Int.self, forKey: .skippedTests) ?? 0
-            return
-        }
-
-        throw DecodingError.keyNotFound(
-            CodingKeys.testsCount,
-            DecodingError.Context(
-                codingPath: decoder.codingPath,
-                debugDescription: "Expected either legacy testsCount or modern totalTestCount in xcresulttool summary"
-            )
-        )
-    }
-}
-
-private struct ToolExecutionContext {
-    let profile: ProjectProfile
-    let jobID: String
-    let store: StateStore
-}
-
-private struct TestOutcome {
-    var resultClass: ResultClass
-    var exitCode: Int32?
-}
-
-private struct ExecutionPaths {
-    let jobRoot: URL
-    let logsRoot: URL
-    let artifactsRoot: URL
-    let derivedData: URL
-    let buildLog: URL
-    let testLog: URL
-    let combinedLog: URL
-    let resultBundle: URL
-    let summary: URL
-
-    init(job: JobRecord) {
-        self.jobRoot = URL(fileURLWithPath: job.jobDirectory)
-        self.logsRoot = jobRoot.appendingPathComponent("logs")
-        self.artifactsRoot = jobRoot.appendingPathComponent("artifacts")
-        self.derivedData = jobRoot.appendingPathComponent("derived-data")
-        self.buildLog = logsRoot.appendingPathComponent("build.log")
-        self.testLog = logsRoot.appendingPathComponent("test.log")
-        self.combinedLog = logsRoot.appendingPathComponent("combined.log")
-        self.resultBundle = artifactsRoot.appendingPathComponent("result.xcresult")
-        self.summary = artifactsRoot.appendingPathComponent("summary.json")
-    }
-
-    func createDirectories(using fileSystem: FileSystem) throws {
-        try fileSystem.createDirectory(logsRoot)
-        try fileSystem.createDirectory(artifactsRoot)
-        try fileSystem.createDirectory(derivedData)
-    }
-
-    func artifacts(fileSystem: FileSystem) -> JobArtifacts {
-        JobArtifacts(
-            xcresult: fileSystem.fileExists(resultBundle) ? resultBundle.path : nil,
-            combinedLog: combinedLog.path,
-            buildLog: buildLog.path,
-            testLog: testLog.path,
-            derivedData: derivedData.path,
-            diagnostics: nil
-        )
-    }
-
-    var initialArtifacts: JobArtifacts {
-        JobArtifacts(
-            xcresult: nil,
-            combinedLog: combinedLog.path,
-            buildLog: buildLog.path,
-            testLog: testLog.path,
-            derivedData: derivedData.path,
-            diagnostics: nil
-        )
-    }
-}
-
-final class JobExecutor {
+final class JobExecutor: @unchecked Sendable {
     private let environment: AppEnvironment
+    private let resultReporter: ResultReporter
+    private let resultPolicy = ResultClassPolicy()
+    private var simulatorLifecycle: SimulatorLifecycle {
+        SimulatorLifecycle(environment: environment, tooling: self)
+    }
+    private var testOutcomeClassifier: TestOutcomeClassifier {
+        TestOutcomeClassifier(resultBundleExists: environment.fileSystem.fileExists)
+    }
 
     init(environment: AppEnvironment) {
         self.environment = environment
+        self.resultReporter = ResultReporter(environment: environment)
     }
 
     func execute(job: JobRecord, profile: ProjectProfile, store: StateStore) throws -> JobSummary {
@@ -137,10 +29,18 @@ final class JobExecutor {
             try store.updateJob(id: job.id, patch: JobStatePatch(state: .running, startedAt: jobStart))
             try store.updateLeaseHeartbeat(jobID: job.id)
             let toolContext = ToolExecutionContext(profile: profile, jobID: job.id, store: store)
+            let heartbeat = JobLeaseHeartbeat(environment: environment, jobID: job.id)
+            heartbeat.start()
+            defer { heartbeat.stop() }
 
             let resolvedSimulatorID = try resolveSimulatorID(request: job.request, context: toolContext)
             simulatorID = resolvedSimulatorID
             try store.updateJob(id: job.id, patch: JobStatePatch(state: .running, simulatorID: resolvedSimulatorID))
+            guard try store.acquireSimulatorLease(simulatorID: resolvedSimulatorID, jobID: job.id, pid: getpid()) else {
+                throw XCStewardError.commandFailed("Simulator \(resolvedSimulatorID) is already leased by another XCSteward job")
+            }
+            defer { try? store.releaseSimulatorLease(simulatorID: resolvedSimulatorID, jobID: job.id) }
+            defer { cleanupSimulatorAfterJob(simulatorID: resolvedSimulatorID, context: toolContext) }
 
             if try isCancelRequested(context: toolContext) {
                 return try finishCanceled(
@@ -153,18 +53,7 @@ final class JobExecutor {
                 )
             }
             if let message = try competingRunnerMessage() {
-                _ = try failAndLog(message: message, exitCode: 75, logURL: paths.buildLog, combinedLog: paths.combinedLog)
-                return try finish(
-                    job: job,
-                    profile: profile,
-                    paths: paths,
-                    state: .failed,
-                    resultClass: .runnerBootstrapFailure,
-                    exitCode: 75,
-                    startedAt: jobStart,
-                    simulatorID: resolvedSimulatorID,
-                    artifacts: paths.initialArtifacts
-                )
+                try warnAndLog(message: message, logURL: paths.buildLog, combinedLog: paths.combinedLog)
             }
             try bootSimulator(simulatorID: resolvedSimulatorID, context: toolContext)
             if try isCancelRequested(context: toolContext) {
@@ -216,24 +105,72 @@ final class JobExecutor {
                 )
             }
 
+            if profile.parallel.mode == .manualShards || profile.parallel.mode == .hybrid {
+                let manualResult = try ManualShardRunner(
+                    environment: environment,
+                    runtime: self,
+                    resultReporter: resultReporter
+                ).run(
+                    primarySimulatorID: resolvedSimulatorID,
+                    paths: paths,
+                    request: job.request,
+                    context: toolContext
+                )
+                let finishedAt = environment.clock.now().timeIntervalSince1970
+                return try finish(
+                    job: job,
+                    profile: profile,
+                    paths: paths,
+                    state: resultPolicy.terminalState(for: manualResult.resultClass),
+                    resultClass: manualResult.resultClass,
+                    exitCode: manualResult.exitCode,
+                    startedAt: jobStart,
+                    finishedAt: finishedAt,
+                    simulatorID: resolvedSimulatorID,
+                    counts: manualResult.counts,
+                    artifacts: manualResult.artifacts,
+                    summaryLine: manualResult.successSummaryLine
+                )
+            }
+
             let testOutcome = try runTestWithRetryIfNeeded(simulatorID: resolvedSimulatorID, paths: paths, request: job.request, context: toolContext)
             let finishedAt = environment.clock.now().timeIntervalSince1970
-            let artifacts = paths.artifacts(fileSystem: environment.fileSystem)
-            let parsedSummary = parseXCResultSummary(at: paths.resultBundle)
+            let parsedSummary = resultReporter.parseXCResultSummary(at: paths.resultBundle)
             let resultClass = testOutcome.resultClass == .success && parsedSummary == nil
                 ? ResultClass.artifactFailure
                 : testOutcome.resultClass
+            if resultClass.isInfrastructureFailure {
+                _ = captureSimulatorDiagnostics(
+                    simulatorID: resolvedSimulatorID,
+                    outputURL: paths.simulatorDiagnostics,
+                    context: toolContext
+                )
+            }
+            let parsedCounts = resultReporter.counts(from: parsedSummary)
+            try resultReporter.writeJUnitReport(
+                project: profile.name,
+                resultClass: resultClass,
+                counts: parsedCounts,
+                durationSeconds: finishedAt - jobStart,
+                cases: resultReporter.junitCasesForSingleRun(
+                    resultClass: resultClass,
+                    counts: parsedCounts,
+                    onlyTesting: job.request.onlyTesting
+                ),
+                outputURL: paths.junitReport
+            )
+            let artifacts = paths.artifacts(fileSystem: environment.fileSystem)
             return try finish(
                 job: job,
                 profile: profile,
                 paths: paths,
-                state: state(for: resultClass),
+                state: resultPolicy.terminalState(for: resultClass),
                 resultClass: resultClass,
                 exitCode: testOutcome.exitCode,
                 startedAt: jobStart,
                 finishedAt: finishedAt,
                 simulatorID: resolvedSimulatorID,
-                counts: counts(from: parsedSummary),
+                counts: parsedCounts,
                 artifacts: artifacts
             )
         } catch {
@@ -251,6 +188,14 @@ final class JobExecutor {
             }
             let resultClass = classifyUnhandled(error)
             let failureStartedAt = startedAt ?? environment.clock.now().timeIntervalSince1970
+            if resultClass.isInfrastructureFailure {
+                let failureContext = ToolExecutionContext(profile: profile, jobID: job.id, store: store)
+                _ = captureSimulatorDiagnostics(
+                    simulatorID: simulatorID ?? job.request.simulatorID ?? profile.defaultSimulatorID ?? "",
+                    outputURL: paths.simulatorDiagnostics,
+                    context: failureContext
+                )
+            }
             let failureArtifacts = paths.artifacts(fileSystem: environment.fileSystem)
             _ = try? failAndLog(
                 message: String(describing: error),
@@ -275,18 +220,24 @@ final class JobExecutor {
 
     private func runBuild(simulatorID: String, paths: ExecutionPaths, request: JobRequest, context: ToolExecutionContext) throws -> ToolResult {
         let profile = context.profile
-        var arguments = xcodebuildBaseArguments(profile: profile)
-        arguments.append(contentsOf: [
-            "-destination", "id=\(simulatorID)",
-            "-parallel-testing-enabled", "NO",
-            "-maximum-parallel-testing-workers", "1",
-            "-derivedDataPath", paths.derivedData.path,
-        ])
-        if let testPlan = request.testPlan ?? profile.defaultTestPlan, !testPlan.isEmpty {
-            arguments.append(contentsOf: ["-testPlan", testPlan])
-        }
-        arguments.append("build-for-testing")
-        return try runAndLog(tool: "xcodebuild", arguments: arguments, timeout: profile.timeouts.build, logURL: paths.buildLog, combinedLog: paths.combinedLog, context: context)
+        let arguments = XcodebuildCommandBuilder(profile: profile).buildForTesting(
+            simulatorID: simulatorID,
+            paths: paths,
+            request: request
+        )
+        return try runAndLog(
+            tool: "xcodebuild",
+            arguments: arguments,
+            timeout: profile.timeouts.build,
+            logURL: paths.buildLog,
+            combinedLog: paths.combinedLog,
+            context: context,
+            environmentOverrides: xcodebuildEnvironment(
+                context: context,
+                temporaryDirectory: paths.temporaryRoot.appendingPathComponent("build"),
+                phase: "build"
+            )
+        )
     }
 
     private func runTestWithRetryIfNeeded(simulatorID: String, paths: ExecutionPaths, request: JobRequest, context: ToolExecutionContext) throws -> TestOutcome {
@@ -295,6 +246,17 @@ final class JobExecutor {
             return TestOutcome(resultClass: .canceled, exitCode: run.exitCode)
         }
         if shouldRetryBootstrapFailure(run: run) {
+            try? context.store.recordInfrastructureEvent(
+                jobID: context.jobID,
+                simulatorID: simulatorID,
+                resultClass: .runnerBootstrapFailure,
+                message: "Retrying xcode-managed test after runner bootstrap failure"
+            )
+            _ = captureSimulatorDiagnostics(
+                simulatorID: simulatorID,
+                outputURL: paths.simulatorDiagnostics,
+                context: context
+            )
             let shutdown = try runTool(tool: "xcrun", arguments: ["simctl", "shutdown", simulatorID], timeout: context.profile.timeouts.boot, context: context)
             try throwIfCanceled(shutdown, context: context)
             let erase = try runTool(tool: "xcrun", arguments: ["simctl", "erase", simulatorID], timeout: context.profile.timeouts.boot, context: context)
@@ -314,186 +276,233 @@ final class JobExecutor {
         if environment.fileSystem.fileExists(paths.resultBundle) {
             try environment.fileSystem.removeItem(paths.resultBundle)
         }
-        guard let xctestrunPath = resolveXCTestRunPath(in: paths.derivedData, preferredTestPlan: request.testPlan ?? profile.defaultTestPlan) else {
+        guard let testReference = resolveTestProductReference(
+            in: paths,
+            preferredTestPlan: request.testPlan ?? profile.defaultTestPlan,
+            context: context
+        ) else {
             return try failAndLog(
-                message: "No .xctestrun file was generated under \(paths.derivedData.appendingPathComponent("Build/Products").path)",
+                message: missingTestProductReferenceMessage(paths: paths, context: context),
                 exitCode: 70,
                 logURL: paths.testLog,
                 combinedLog: paths.combinedLog
             )
         }
-        var arguments = [
-            "-xctestrun", xctestrunPath.path,
-            "-destination", "id=\(simulatorID)",
-            "-parallel-testing-enabled", "NO",
-            "-maximum-parallel-testing-workers", "1",
-            "-resultBundlePath", paths.resultBundle.path,
-        ]
-        for onlyTesting in request.onlyTesting {
-            arguments.append("-only-testing:\(onlyTesting)")
-        }
-        arguments.append("test-without-building")
-        return try runAndLog(tool: "xcodebuild", arguments: arguments, timeout: profile.timeouts.test, logURL: paths.testLog, combinedLog: paths.combinedLog, context: context)
+        try prepareSimulatorPrivacy(
+            simulatorID: simulatorID,
+            logURL: paths.testLog,
+            combinedLog: paths.combinedLog,
+            context: context
+        )
+        try prepareResultStreamIfNeeded(for: profile.resultStream, path: paths.resultStream)
+        let arguments = XcodebuildCommandBuilder(profile: profile).xcodeManagedTest(
+            testReference: testReference,
+            simulatorID: simulatorID,
+            paths: paths,
+            request: request
+        )
+        return try runAndLog(
+            tool: "xcodebuild",
+            arguments: arguments,
+            timeout: profile.timeouts.test,
+            logURL: paths.testLog,
+            combinedLog: paths.combinedLog,
+            context: context,
+            environmentOverrides: testRunnerEnvironment(
+                context: context,
+                temporaryDirectory: paths.temporaryRoot.appendingPathComponent("test"),
+                phase: "test"
+            )
+        )
+    }
+
+    @discardableResult
+    func captureSimulatorDiagnostics(
+        simulatorID: String,
+        outputURL: URL,
+        context: ToolExecutionContext
+    ) -> String? {
+        simulatorLifecycle.captureDiagnostics(
+            simulatorID: simulatorID,
+            outputURL: outputURL,
+            context: context
+        )
+    }
+
+    func prepareSimulatorPrivacy(
+        simulatorID: String,
+        logURL: URL,
+        combinedLog: URL,
+        context: ToolExecutionContext
+    ) throws {
+        try simulatorLifecycle.preparePrivacy(
+            simulatorID: simulatorID,
+            logURL: logURL,
+            combinedLog: combinedLog,
+            context: context
+        )
+    }
+
+    func cleanupSimulatorAfterJob(simulatorID: String, context: ToolExecutionContext) {
+        simulatorLifecycle.cleanupAfterJob(simulatorID: simulatorID, context: context)
+    }
+
+    func shutdownSimulatorForCloneTemplate(simulatorID: String, context: ToolExecutionContext) throws {
+        try simulatorLifecycle.shutdownSimulatorForCloneTemplate(simulatorID: simulatorID, context: context)
+    }
+
+    func cloneManagedShardSimulator(
+        templateSimulatorID: String,
+        managed: ManagedSimulator,
+        shardIndex: Int,
+        context: ToolExecutionContext
+    ) throws -> String {
+        try simulatorLifecycle.cloneManagedShardSimulator(
+            templateSimulatorID: templateSimulatorID,
+            managed: managed,
+            shardIndex: shardIndex,
+            context: context
+        )
+    }
+
+    func recoverSimulatorForShardRetry(simulatorID: String, context: ToolExecutionContext) throws {
+        try simulatorLifecycle.recoverForShardRetry(simulatorID: simulatorID, context: context)
+    }
+
+    func deleteTransientSimulatorAfterJob(simulatorID: String, context: ToolExecutionContext) {
+        simulatorLifecycle.deleteTransientSimulatorAfterJob(simulatorID: simulatorID, context: context)
     }
 
     private func resolveSimulatorID(request: JobRequest, context: ToolExecutionContext) throws -> String {
-        let profile = context.profile
-        if let requestedSimulatorID = request.simulatorID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !requestedSimulatorID.isEmpty {
-            if !profile.allowedSimulatorIDs.isEmpty,
-               !profile.allowedSimulatorIDs.contains(requestedSimulatorID),
-               requestedSimulatorID != profile.defaultSimulatorID {
-                throw XCStewardError.invalidConfiguration("Requested simulator override \(requestedSimulatorID) is not allowed by profile \(profile.name)")
-            }
-            return requestedSimulatorID
-        }
-        if let defaultSimulatorID = profile.defaultSimulatorID {
-            return defaultSimulatorID
-        }
-        if let managed = profile.managedSimulator {
-            let list = try runTool(tool: "xcrun", arguments: ["simctl", "list", "devices"], timeout: profile.timeouts.boot, context: context)
-            try throwIfCanceled(list, context: context)
-            if list.exitCode != 0 || list.timedOut {
-                throw commandFailed("Unable to list simulators for managed simulator '\(managed.name)'", output: list.output)
-            }
-            if let match = parseSimulatorID(from: list.output, preferredName: managed.name) {
-                return match
-            }
-            let create = try runTool(tool: "xcrun", arguments: ["simctl", "create", managed.name, managed.deviceType, managed.runtime], timeout: profile.timeouts.boot, context: context)
-            try throwIfCanceled(create, context: context)
-            if create.exitCode != 0 || create.timedOut {
-                throw commandFailed("Unable to create managed simulator '\(managed.name)'", output: create.output)
-            }
-            if let created = parseCreatedSimulatorID(from: create.output) {
-                return created
-            }
-            throw commandFailed("Unable to create managed simulator '\(managed.name)': expected a single simulator UDID in simctl create output", output: create.output)
-        }
-        throw XCStewardError.invalidConfiguration("Profile \(profile.name) has no simulator assignment")
+        try simulatorLifecycle.resolveSimulatorID(request: request, context: context)
     }
 
-    private func classify(run: ToolResult, resultBundle: URL) -> TestOutcome {
-        if run.timedOut {
-            return TestOutcome(
-                resultClass: isRunnerBootstrapFailure(run: run) ? .runnerBootstrapFailure : .testTimeout,
-                exitCode: run.exitCode
-            )
-        }
-        if run.exitCode == 0 {
-            return TestOutcome(
-                resultClass: environment.fileSystem.fileExists(resultBundle) ? .success : .artifactFailure,
-                exitCode: 0
-            )
-        }
-        if isRunnerConfigurationFailure(run: run) {
-            return TestOutcome(resultClass: .runnerBootstrapFailure, exitCode: run.exitCode)
-        }
-        if !environment.fileSystem.fileExists(resultBundle) {
-            return TestOutcome(resultClass: .artifactFailure, exitCode: run.exitCode)
-        }
-        return TestOutcome(resultClass: .testFailure, exitCode: run.exitCode)
+    func classify(run: ToolResult, resultBundle: URL) -> TestOutcome {
+        testOutcomeClassifier.classify(run: run, resultBundle: resultBundle)
     }
 
-    private func state(for resultClass: ResultClass) -> JobState {
-        switch resultClass {
-        case .success:
-            return .succeeded
-        case .canceled:
-            return .canceled
-        case .buildFailure, .testFailure, .testTimeout, .runnerBootstrapFailure, .artifactFailure, .internalError:
-            return .failed
-        }
-    }
-
-    private func counts(from summary: XCResultSummary?) -> JobCounts? {
-        summary.map {
-            JobCounts(
-                testsRun: $0.testsCount,
-                testsFailed: $0.testsFailedCount,
-                testsSkipped: $0.testsSkippedCount
-            )
-        }
-    }
-
-    private func commandFailed(_ message: String, output: String) -> XCStewardError {
+    func commandFailed(_ message: String, output: String) -> XCStewardError {
         let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return .commandFailed(detail.isEmpty ? message : "\(message): \(detail)")
     }
 
-    private func shouldRetryBootstrapFailure(run: ToolResult) -> Bool {
-        isRunnerBootstrapFailure(run: run)
+    func shouldRetryBootstrapFailure(run: ToolResult) -> Bool {
+        testOutcomeClassifier.shouldRetryBootstrapFailure(run: run)
     }
 
-    private func isRunnerBootstrapFailure(run: ToolResult) -> Bool {
-        let patterns = [
-            "Failed to background test runner",
-            "operation never finished bootstrapping",
-            "Lost connection to testmanagerd",
-            "Early unexpected exit",
+    private func xcodebuildEnvironment(
+        context: ToolExecutionContext,
+        temporaryDirectory: URL,
+        phase: String
+    ) -> [String: String] {
+        [
+            "TMPDIR": temporaryDirectory.path,
+            "XCSTEWARD_JOB_ID": context.jobID,
+            "XCSTEWARD_PROJECT": context.profile.name,
+            "XCSTEWARD_PHASE": phase,
         ]
-        return patterns.contains(where: { run.output.contains($0) })
     }
 
-    private func isRunnerConfigurationFailure(run: ToolResult) -> Bool {
-        let patterns = [
-            "Failed to background test runner",
-            "operation never finished bootstrapping",
-            "Lost connection to testmanagerd",
-            "Early unexpected exit",
-            "There are no test bundles available to test.",
-            "does not have an associated test plan named",
-            "Unable to find a device matching the provided destination specifier",
-            "No .xctestrun file was generated under",
+    func testRunnerEnvironment(
+        context: ToolExecutionContext,
+        temporaryDirectory: URL,
+        phase: String,
+        shardID: String? = nil,
+        shardIndex: Int? = nil,
+        totalShards: Int? = nil
+    ) -> [String: String] {
+        var values = xcodebuildEnvironment(
+            context: context,
+            temporaryDirectory: temporaryDirectory,
+            phase: phase
+        )
+        values["TEST_RUNNER_XCSTEWARD_JOB_ID"] = context.jobID
+        values["TEST_RUNNER_XCSTEWARD_PROJECT"] = context.profile.name
+        values["TEST_RUNNER_XCSTEWARD_PHASE"] = phase
+        values["TEST_RUNNER_XCSTEWARD_MODE"] = context.profile.parallel.mode.rawValue
+        applyPortRangeEnvironment(
+            to: &values,
+            settings: context.profile.ports,
+            rangeIndex: shardIndex ?? 0
+        )
+        if let shardID {
+            values["XCSTEWARD_SHARD_ID"] = shardID
+            values["TEST_RUNNER_XCSTEWARD_SHARD_ID"] = shardID
+        }
+        if let shardIndex {
+            values["XCSTEWARD_SHARD_INDEX"] = "\(shardIndex)"
+            values["TEST_RUNNER_XCSTEWARD_SHARD_INDEX"] = "\(shardIndex)"
+        }
+        if let totalShards {
+            values["XCSTEWARD_TOTAL_SHARDS"] = "\(totalShards)"
+            values["TEST_RUNNER_XCSTEWARD_TOTAL_SHARDS"] = "\(totalShards)"
+        }
+        return values
+    }
+
+    private func applyPortRangeEnvironment(
+        to values: inout [String: String],
+        settings: PortRangeSettings?,
+        rangeIndex: Int
+    ) {
+        guard let settings else {
+            return
+        }
+        let start = settings.base + (rangeIndex * settings.stride)
+        let end = start + settings.count - 1
+        let range = "\(start)-\(end)"
+        let portValues = [
+            "XCSTEWARD_PORT_RANGE_INDEX": "\(rangeIndex)",
+            "XCSTEWARD_PORT_RANGE_START": "\(start)",
+            "XCSTEWARD_PORT_RANGE_END": "\(end)",
+            "XCSTEWARD_PORT_RANGE_COUNT": "\(settings.count)",
+            "XCSTEWARD_PORT_RANGE": range,
         ]
-        return patterns.contains(where: { run.output.contains($0) })
+        for (key, value) in portValues {
+            values[key] = value
+            values["TEST_RUNNER_\(key)"] = value
+        }
     }
 
-    private func parseXCResultSummary(at resultBundle: URL) -> XCResultSummary? {
-        guard environment.fileSystem.fileExists(resultBundle) else {
-            return nil
-        }
-        guard let tool = try? environment.toolRunner.run(
-            tool: "xcrun",
-            arguments: ["xcresulttool", "get", "test-results", "summary", "--path", resultBundle.path],
-            environment: [:],
-            workingDirectory: nil,
-            timeout: 30
-        ) else {
-            return nil
-        }
-        guard tool.exitCode == 0, let data = tool.output.data(using: .utf8) else {
-            return nil
-        }
-        return try? decodeJSON(XCResultSummary.self, from: data)
-    }
-
-    private func runAndLog(
+    func runAndLog(
         tool: String,
         arguments: [String],
         timeout: TimeInterval,
         logURL: URL,
         combinedLog: URL,
-        context: ToolExecutionContext
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String] = [:]
     ) throws -> ToolResult {
-        let result = try runTool(tool: tool, arguments: arguments, timeout: timeout, context: context)
-        try environment.fileSystem.writeData(Data(result.output.utf8), to: logURL)
+        let result = try runTool(
+            tool: tool,
+            arguments: arguments,
+            timeout: timeout,
+            context: context,
+            environmentOverrides: environmentOverrides
+        )
+        try environment.fileSystem.appendData(Data(result.output.utf8), to: logURL)
         try environment.fileSystem.appendData(Data(result.output.utf8), to: combinedLog)
         return result
     }
 
-    private func runTool(
+    func runTool(
         tool: String,
         arguments: [String],
         timeout: TimeInterval,
-        context: ToolExecutionContext
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String] = [:]
     ) throws -> ToolResult {
+        if let tmpdir = environmentOverrides["TMPDIR"], !tmpdir.isEmpty {
+            try? environment.fileSystem.createDirectory(URL(fileURLWithPath: tmpdir))
+        }
         defer {
             try? context.store.clearJobProcessID(id: context.jobID)
         }
+        let toolEnvironment = context.profile.env.merging(environmentOverrides) { _, override in override }
         return try environment.toolRunner.run(
             tool: tool,
             arguments: arguments,
-            environment: context.profile.env,
+            environment: toolEnvironment,
             workingDirectory: context.profile.workingDirectory,
             timeout: timeout,
             processStarted: { pid in
@@ -502,12 +511,38 @@ final class JobExecutor {
         )
     }
 
-    private func failAndLog(message: String, exitCode: Int32, logURL: URL, combinedLog: URL) throws -> ToolResult {
+    func failAndLog(message: String, exitCode: Int32, logURL: URL, combinedLog: URL) throws -> ToolResult {
         let output = message.hasSuffix("\n") ? message : "\(message)\n"
         let data = Data(output.utf8)
-        try environment.fileSystem.writeData(data, to: logURL)
+        try environment.fileSystem.appendData(data, to: logURL)
         try environment.fileSystem.appendData(data, to: combinedLog)
         return ToolResult(exitCode: exitCode, output: output, timedOut: false)
+    }
+
+    func warnAndLog(message: String, logURL: URL, combinedLog: URL) throws {
+        let output = "WARNING: \(message)\n"
+        let data = Data(output.utf8)
+        try environment.fileSystem.appendData(data, to: logURL)
+        try environment.fileSystem.appendData(data, to: combinedLog)
+    }
+
+    func testIdentifier(_ identifier: String, matchesSkipFilter skipFilter: String) -> Bool {
+        let identifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let skipFilter = skipFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty, !skipFilter.isEmpty else {
+            return false
+        }
+        return identifier == skipFilter || identifier.hasPrefix("\(skipFilter)/")
+    }
+
+    func prepareResultStreamIfNeeded(for settings: ResultStreamSettings, path: URL) throws {
+        guard settings.enabled else {
+            return
+        }
+        if environment.fileSystem.fileExists(path) {
+            try environment.fileSystem.removeItem(path)
+        }
+        try environment.fileSystem.writeData(Data(), to: path)
     }
 
     private func competingRunnerMessage() throws -> String? {
@@ -540,81 +575,8 @@ final class JobExecutor {
         return "Competing simulator-hosted test activity detected: \(competingProcess.command)"
     }
 
-    private func bootSimulator(simulatorID: String, context: ToolExecutionContext) throws {
-        let profile = context.profile
-        let boot = try runSimulatorBoot(simulatorID: simulatorID, context: context)
-        let alreadyBooted = boot.output.contains("current state: Booted")
-
-        do {
-            try confirmBootStatus(
-                simulatorID: simulatorID,
-                timeout: alreadyBooted ? profile.timeouts.boot : max(profile.timeouts.boot, 240),
-                context: context
-            )
-        } catch {
-            guard alreadyBooted,
-                  String(describing: error).contains("Unable to confirm simulator boot status") else {
-                throw error
-            }
-            let shutdown = try runTool(
-                tool: "xcrun",
-                arguments: ["simctl", "shutdown", simulatorID],
-                timeout: profile.timeouts.boot,
-                context: context
-            )
-            try throwIfCanceled(shutdown, context: context)
-            _ = try runSimulatorBoot(simulatorID: simulatorID, context: context)
-            try confirmBootStatus(
-                simulatorID: simulatorID,
-                timeout: max(profile.timeouts.boot, 240),
-                context: context
-            )
-        }
-    }
-
-    private func runSimulatorBoot(simulatorID: String, context: ToolExecutionContext) throws -> ToolResult {
-        let boot = try runTool(
-            tool: "xcrun",
-            arguments: ["simctl", "boot", simulatorID],
-            timeout: context.profile.timeouts.boot,
-            context: context
-        )
-        try throwIfCanceled(boot, context: context)
-        if boot.exitCode != 0 && !boot.output.contains("current state: Booted") {
-            throw XCStewardError.commandFailed("Unable to boot simulator \(simulatorID)")
-        }
-        return boot
-    }
-
-    private func confirmBootStatus(simulatorID: String, timeout: TimeInterval, context: ToolExecutionContext) throws {
-        let bootStatus = try runTool(
-            tool: "xcrun",
-            arguments: ["simctl", "bootstatus", simulatorID, "-b"],
-            timeout: timeout,
-            context: context
-        )
-        try throwIfCanceled(bootStatus, context: context)
-        guard bootStatus.exitCode == 0, !bootStatus.timedOut else {
-            throw bootStatusError(simulatorID: simulatorID, result: bootStatus)
-        }
-    }
-
-    private func bootStatusError(simulatorID: String, result: ToolResult) -> XCStewardError {
-        let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if detail.isEmpty {
-            return .commandFailed("Unable to confirm simulator boot status for \(simulatorID)")
-        }
-        return .commandFailed("Unable to confirm simulator boot status for \(simulatorID): \(detail)")
-    }
-
-    private func xcodebuildBaseArguments(profile: ProjectProfile) -> [String] {
-        if let projectPath = profile.projectPath {
-            return ["-project", URL(fileURLWithPath: profile.repoRoot).appendingPathComponent(projectPath).path, "-scheme", profile.scheme]
-        }
-        if let workspacePath = profile.workspacePath {
-            return ["-workspace", URL(fileURLWithPath: profile.repoRoot).appendingPathComponent(workspacePath).path, "-scheme", profile.scheme]
-        }
-        return ["-scheme", profile.scheme]
+    func bootSimulator(simulatorID: String, context: ToolExecutionContext) throws {
+        try simulatorLifecycle.bootSimulator(simulatorID: simulatorID, context: context)
     }
 
     private func finishCanceled(
@@ -666,9 +628,15 @@ final class JobExecutor {
             simulatorID: simulatorID,
             counts: counts,
             artifacts: artifacts,
-            summaryLine: summaryLine ?? self.summaryLine(for: resultClass)
+            summaryLine: summaryLine ?? resultPolicy.summaryLine(for: resultClass)
         )
-        try persistSummary(summary, to: paths.summary)
+        try resultReporter.persistSummary(summary, to: paths.summary)
+        try? resultReporter.writeRunMetadata(
+            summary: summary,
+            profile: profile,
+            request: job.request,
+            paths: paths
+        )
         return summary
     }
 
@@ -706,42 +674,17 @@ final class JobExecutor {
         )
     }
 
-    private func summaryLine(for resultClass: ResultClass) -> String {
-        switch resultClass {
-        case .success:
-            return "Tests succeeded"
-        case .buildFailure:
-            return "Build failed"
-        case .runnerBootstrapFailure:
-            return "Runner failed before tests executed"
-        case .artifactFailure:
-            return "Artifacts were missing or invalid"
-        case .testTimeout:
-            return "Tests timed out"
-        case .testFailure:
-            return "Tests failed"
-        case .canceled:
-            return "Canceled"
-        case .internalError:
-            return "Internal error"
-        }
-    }
-
-    private func persistSummary(_ summary: JobSummary, to url: URL) throws {
-        try environment.fileSystem.writeData(try jsonData(summary), to: url)
-    }
-
     private func isCancelRequested(context: ToolExecutionContext) throws -> Bool {
         try context.store.fetchJob(id: context.jobID)?.cancelRequested == true
     }
 
-    private func throwIfCanceled(_ result: ToolResult, context: ToolExecutionContext) throws {
+    func throwIfCanceled(_ result: ToolResult, context: ToolExecutionContext) throws {
         if isCancellationResult(result), try isCancelRequested(context: context) {
             throw XCStewardError.canceled("Canceled")
         }
     }
 
-    private func isCancellationResult(_ result: ToolResult) -> Bool {
+    func isCancellationResult(_ result: ToolResult) -> Bool {
         !result.timedOut && (result.exitCode == 128 + SIGTERM || result.exitCode == 128 + SIGKILL)
     }
 
@@ -750,6 +693,27 @@ final class JobExecutor {
             return true
         }
         return false
+    }
+
+    func resolveTestProductReference(
+        in paths: ExecutionPaths,
+        preferredTestPlan: String?,
+        context: ToolExecutionContext
+    ) -> TestProductReference? {
+        if context.profile.testProducts.useForTesting {
+            return environment.fileSystem.fileExists(paths.testProducts)
+                ? .testProducts(paths.testProducts)
+                : nil
+        }
+        return resolveXCTestRunPath(in: paths.derivedData, preferredTestPlan: preferredTestPlan)
+            .map(TestProductReference.xctestrun)
+    }
+
+    func missingTestProductReferenceMessage(paths: ExecutionPaths, context: ToolExecutionContext) -> String {
+        if context.profile.testProducts.useForTesting {
+            return "No .xctestproducts bundle was generated at \(paths.testProducts.path)"
+        }
+        return "No .xctestrun file was generated under \(paths.derivedData.appendingPathComponent("Build/Products").path)"
     }
 
     private func resolveXCTestRunPath(in derivedData: URL, preferredTestPlan: String?) -> URL? {
@@ -775,57 +739,8 @@ final class JobExecutor {
         return candidates.first
     }
 
-    private func parseSimulatorID(from output: String, preferredName: String?) -> String? {
-        for line in output.split(separator: "\n") {
-            let string = String(line)
-            if let preferredName, !string.contains(preferredName) { continue }
-            var searchStart = string.startIndex
-            while let open = string[searchStart...].firstIndex(of: "("),
-                  let close = string[open...].dropFirst().firstIndex(of: ")") {
-                let candidate = String(string[string.index(after: open)..<close]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !candidate.isEmpty && !isSimulatorStatus(candidate) {
-                    return candidate
-                }
-                searchStart = string.index(after: close)
-            }
-        }
-        return nil
-    }
-
-    private func parseCreatedSimulatorID(from output: String) -> String? {
-        let lines = output
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard lines.count == 1, isSimulatorUDID(lines[0]) else {
-            return nil
-        }
-        return lines[0]
-    }
-
-    private func isSimulatorUDID(_ value: String) -> Bool {
-        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
-        let expectedLengths = [8, 4, 4, 4, 12]
-        guard parts.count == expectedLengths.count else {
-            return false
-        }
-        for (part, expectedLength) in zip(parts, expectedLengths) {
-            guard part.count == expectedLength,
-                  part.allSatisfy({ $0.isHexDigit }) else {
-                return false
-            }
-        }
-        return true
-    }
-
-    private func isSimulatorStatus(_ value: String) -> Bool {
-        let statuses: Set<String> = [
-            "Shutdown",
-            "Booted",
-            "Creating",
-            "Shutting Down",
-        ]
-        return statuses.contains(value)
+    func parseCreatedSimulatorID(from output: String) -> String? {
+        simulatorLifecycle.parseCreatedSimulatorID(from: output)
     }
 
     private func classifyUnhandled(_ error: Error) -> ResultClass {
@@ -835,8 +750,12 @@ final class JobExecutor {
             "Unable to confirm simulator boot status",
             "Unable to list simulators",
             "Unable to create managed simulator",
+            "Unable to clone managed simulator",
+            "Unable to configure simulator privacy",
             "Unable to resolve executable",
+            "already leased by another XCSteward job",
             "Competing simulator-hosted test activity",
+            "Unable to enumerate tests",
         ]
         return runnerPatterns.contains { description.contains($0) }
             ? .runnerBootstrapFailure

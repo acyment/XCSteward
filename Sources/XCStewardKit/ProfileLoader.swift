@@ -26,57 +26,85 @@ public struct ProfileLoader {
     }
 
     private func materializeProfile(name: String, raw: [String: [String: TOMLValue]]) throws -> ProjectProfile {
-        func string(_ key: String, in section: String = "") -> String? {
-            guard let value = raw[section]?[key] else { return nil }
-            if case let .string(string) = value { return string }
-            return nil
-        }
-        func array(_ key: String, in section: String = "") -> [String] {
-            guard let value = raw[section]?[key] else { return [] }
-            if case let .array(values) = value { return values }
-            return []
-        }
-        func integer(_ key: String, in section: String = "") -> Int? {
-            guard let value = raw[section]?[key] else { return nil }
-            if case let .integer(number) = value { return number }
-            return nil
-        }
-        guard let repoRoot = string("repo_root"),
-              let scheme = string("scheme") else {
+        let reader = TOMLProfileReader(raw: raw)
+        let root = reader.root
+        guard let repoRoot = root.string("repo_root"),
+              let scheme = root.string("scheme") else {
             throw XCStewardError.invalidConfiguration("Profile \(name) is missing repo_root or scheme")
         }
-        let managedSimulator: ManagedSimulator?
-        if let managedName = string("name", in: "managed_simulator"),
-           let deviceType = string("device_type", in: "managed_simulator"),
-           let runtime = string("runtime", in: "managed_simulator") {
-            managedSimulator = ManagedSimulator(name: managedName, deviceType: deviceType, runtime: runtime)
-        } else {
-            managedSimulator = nil
-        }
-        var envValues: [String: String] = [:]
-        for (key, value) in raw["env"] ?? [:] {
-            if case let .string(string) = value {
-                envValues[key] = string
-            }
-        }
-        let timeouts = Timeouts(
-            boot: TimeInterval(integer("boot", in: "timeouts") ?? 30),
-            build: TimeInterval(integer("build", in: "timeouts") ?? 600),
-            test: TimeInterval(integer("test", in: "timeouts") ?? 600)
+        let parallel = try ProfileSectionDecoders.parallel(
+            profileName: name,
+            reader: reader.section("parallel")
         )
+        let ports = try ProfileSectionDecoders.ports(
+            profileName: name,
+            reader: reader.section("ports"),
+            shardCount: parallel.shardCount
+        )
+        let xctestTimeouts = try ProfileSectionDecoders.xctestTimeouts(
+            profileName: name,
+            reader: reader.section("test_timeouts")
+        )
+        let xctestRetries = try ProfileSectionDecoders.xctestRetries(
+            profileName: name,
+            reader: reader.section("test_retries")
+        )
+        let xctestDiagnostics = try ProfileSectionDecoders.xctestDiagnostics(
+            profileName: name,
+            reader: reader.section("test_diagnostics")
+        )
+        let destination = try ProfileSectionDecoders.destination(
+            profileName: name,
+            reader: reader.section("destination")
+        )
+        let coverage = try ProfileSectionDecoders.coverage(
+            profileName: name,
+            reader: reader.section("coverage")
+        )
+        let resultStream = try ProfileSectionDecoders.resultStream(
+            profileName: name,
+            reader: reader.section("result_stream")
+        )
+        let resultBundle = try ProfileSectionDecoders.resultBundle(
+            profileName: name,
+            reader: reader.section("result_bundle")
+        )
+        let testProducts = try ProfileSectionDecoders.testProducts(
+            profileName: name,
+            reader: reader.section("test_products")
+        )
+        let privacy = try ProfileSectionDecoders.privacy(
+            profileName: name,
+            reader: reader.section("privacy")
+        )
+        let managedSimulator = ProfileSectionDecoders.managedSimulator(reader: reader.section("managed_simulator"))
+        let envValues = ProfileSectionDecoders.env(reader: reader.section("env"))
+        let timeouts = ProfileSectionDecoders.timeouts(reader: reader.section("timeouts"))
+        let resetPolicy = try ProfileSectionDecoders.resetPolicy(profileName: name, root: root)
         return ProjectProfile(
             name: name,
             repoRoot: repoRoot,
-            projectPath: string("project_path"),
-            workspacePath: string("workspace_path"),
+            projectPath: root.string("project_path"),
+            workspacePath: root.string("workspace_path"),
             scheme: scheme,
-            defaultSimulatorID: string("default_simulator_id"),
+            defaultSimulatorID: root.string("default_simulator_id"),
             managedSimulator: managedSimulator,
-            defaultTestPlan: string("default_test_plan"),
-            allowedSimulatorIDs: array("allowed_simulator_ids"),
+            defaultTestPlan: root.string("default_test_plan"),
+            allowedSimulatorIDs: root.array("allowed_simulator_ids"),
             env: envValues,
             timeouts: timeouts,
-            resetPolicy: string("reset_policy")
+            resetPolicy: resetPolicy,
+            parallel: parallel,
+            ports: ports,
+            xctestTimeouts: xctestTimeouts,
+            xctestRetries: xctestRetries,
+            xctestDiagnostics: xctestDiagnostics,
+            destination: destination,
+            coverage: coverage,
+            resultStream: resultStream,
+            resultBundle: resultBundle,
+            testProducts: testProducts,
+            privacy: privacy
         )
     }
 

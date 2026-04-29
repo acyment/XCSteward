@@ -136,6 +136,11 @@ public struct XCStewardApp {
           --test-plan <name>          Override the profile's default test plan.
           --simulator-id <id>         Override the profile's simulator selection.
           --only-testing <identifier> Restrict execution to a test target or test case. Repeatable.
+          --skip-testing <identifier> Exclude a test target or test case. Repeatable.
+          --only-test-configuration <name>
+                                      Restrict execution to a test plan configuration. Repeatable.
+          --skip-test-configuration <name>
+                                      Exclude a test plan configuration. Repeatable.
           --help, -h                  Show this command help.
         """
     }
@@ -230,8 +235,30 @@ public struct XCStewardApp {
         while let value = consumeOption("--only-testing", from: &arguments) {
             onlyTesting.append(value)
         }
+        var skipTesting: [String] = []
+        while let value = consumeOption("--skip-testing", from: &arguments) {
+            skipTesting.append(value)
+        }
+        var onlyTestConfigurations: [String] = []
+        while let value = consumeOption("--only-test-configuration", from: &arguments) {
+            onlyTestConfigurations.append(value)
+        }
+        var skipTestConfigurations: [String] = []
+        while let value = consumeOption("--skip-test-configuration", from: &arguments) {
+            skipTestConfigurations.append(value)
+        }
 
-        let request = JobRequest(project: project, testPlan: testPlan, onlyTesting: onlyTesting, simulatorID: explicitSimulator, metadata: [:], wait: wait)
+        let request = JobRequest(
+            project: project,
+            testPlan: testPlan,
+            onlyTesting: onlyTesting,
+            skipTesting: skipTesting,
+            onlyTestConfigurations: onlyTestConfigurations,
+            skipTestConfigurations: skipTestConfigurations,
+            simulatorID: explicitSimulator,
+            metadata: [:],
+            wait: wait
+        )
         let now = environment.clock.now().timeIntervalSince1970
         let jobID = environment.uuidProvider.makeUUID()
         let jobDirectory = environment.paths.jobsRoot.appendingPathComponent(jobID)
@@ -316,24 +343,7 @@ public struct XCStewardApp {
         }
         if job.state == .queued {
             let finishedAt = environment.clock.now().timeIntervalSince1970
-            let summary = JobSummary(
-                jobID: job.id,
-                project: job.project,
-                state: .canceled,
-                resultClass: .canceled,
-                exitCode: nil,
-                submittedAt: job.createdAt,
-                startedAt: nil,
-                finishedAt: finishedAt,
-                durationSeconds: 0,
-                testPlan: job.request.testPlan,
-                onlyTesting: job.request.onlyTesting,
-                simulatorID: job.simulatorID,
-                counts: nil,
-                artifacts: JobArtifacts(xcresult: nil, combinedLog: nil, buildLog: nil, testLog: nil, derivedData: nil, diagnostics: nil),
-                summaryLine: "Canceled",
-                metadata: job.request.metadata
-            )
+            let summary = JobSummaryFactory().queuedCanceledSummary(job: job, finishedAt: finishedAt)
             try store.updateJob(
                 id: jobID,
                 patch: JobStatePatch(
@@ -347,10 +357,10 @@ public struct XCStewardApp {
         } else {
             try store.requestCancel(jobID: jobID)
             let workerPID = try store.currentLease()?.pid
-            if let pid = job.processID, pid > 0, pid != workerPID {
-                if kill(-pid, SIGTERM) != 0 {
-                    kill(pid, SIGTERM)
-                }
+            let activeProcessID = (try store.fetchJob(id: jobID))?.processID ?? job.processID
+            if let pid = activeProcessID, pid > 0, pid != workerPID {
+                _ = kill(-pid, SIGTERM)
+                _ = kill(pid, SIGTERM)
             }
         }
         let updated = try store.fetchJob(id: jobID) ?? job
@@ -451,31 +461,7 @@ public struct XCStewardApp {
         if environment.fileSystem.fileExists(summaryURL) {
             return try decodeJSON(JobSummary.self, from: environment.fileSystem.readData(from: summaryURL))
         }
-        return JobSummary(
-            jobID: job.id,
-            project: job.project,
-            state: job.state,
-            resultClass: job.resultClass,
-            exitCode: nil,
-            submittedAt: job.createdAt,
-            startedAt: job.startedAt,
-            finishedAt: job.finishedAt,
-            durationSeconds: nil,
-            testPlan: job.request.testPlan,
-            onlyTesting: job.request.onlyTesting,
-            simulatorID: job.simulatorID,
-            counts: nil,
-            artifacts: JobArtifacts(
-                xcresult: root.appendingPathComponent("artifacts/result.xcresult").path,
-                combinedLog: root.appendingPathComponent("logs/combined.log").path,
-                buildLog: root.appendingPathComponent("logs/build.log").path,
-                testLog: root.appendingPathComponent("logs/test.log").path,
-                derivedData: root.appendingPathComponent("derived-data").path,
-                diagnostics: nil
-            ),
-            summaryLine: job.state.rawValue.capitalized,
-            metadata: job.request.metadata
-        )
+        return JobSummaryFactory().fallbackSummary(job: job)
     }
 }
 
