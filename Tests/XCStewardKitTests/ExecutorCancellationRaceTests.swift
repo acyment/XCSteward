@@ -44,7 +44,18 @@ final class ExecutorCancellationRaceTests: XCTestCase {
             allowedSimulatorIDs: [],
             env: [:],
             timeouts: Timeouts(boot: 1, build: 1, test: 1),
-            resetPolicy: nil
+            resetPolicy: nil,
+            parallel: ParallelSettings(),
+            ports: nil,
+            xctestTimeouts: XCTestTimeoutSettings(),
+            xctestRetries: XCTestRetrySettings(),
+            xctestDiagnostics: XCTestDiagnosticSettings(),
+            destination: XcodeDestinationSettings(),
+            coverage: CodeCoverageSettings(),
+            resultStream: ResultStreamSettings(),
+            resultBundle: ResultBundleSettings(),
+            testProducts: TestProductsSettings(),
+            privacy: SimulatorPrivacySettings()
         )
 
         let summary = try JobExecutor(environment: environment).execute(job: job, profile: profile, store: store)

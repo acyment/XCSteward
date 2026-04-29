@@ -35,6 +35,9 @@ func runCLI(
     process.arguments = arguments
     process.currentDirectoryURL = currentDirectoryURL
     var mergedEnvironment = ProcessInfo.processInfo.environment
+    mergedEnvironment["XCSTEWARD_DOCTOR_MIN_FREE_BYTES"] = "0"
+    mergedEnvironment["XCSTEWARD_DOCTOR_WARN_FREE_BYTES"] = "0"
+    mergedEnvironment["XCSTEWARD_DOCTOR_WARN_FREE_PERCENT"] = "0"
     for (key, value) in environment {
         mergedEnvironment[key] = value
     }
@@ -63,6 +66,7 @@ func makeTempDirectory(function: String = #function) throws -> URL {
         .appendingPathComponent(UUID().uuidString)
         .appendingPathComponent(function)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    TestTempDirectoryTracker.shared.track(root)
     return root
 }
 
@@ -111,4 +115,41 @@ func seedStaleLease(stateRoot: URL) throws {
         """,
         to: stateRoot.appendingPathComponent("stale-lease.json")
     )
+}
+
+private final class TestTempDirectoryTracker: NSObject, XCTestObservation, @unchecked Sendable {
+    static let shared = TestTempDirectoryTracker()
+
+    private let lock = NSLock()
+    private var registered = false
+    private var directories: [URL] = []
+
+    func track(_ url: URL) {
+        lock.lock()
+        if !registered {
+            XCTestObservationCenter.shared.addTestObserver(self)
+            registered = true
+        }
+        directories.append(url)
+        lock.unlock()
+    }
+
+    func testCaseDidFinish(_ testCase: XCTestCase) {
+        cleanupTrackedDirectories()
+    }
+
+    func testBundleDidFinish(_ testBundle: Bundle) {
+        cleanupTrackedDirectories()
+    }
+
+    private func cleanupTrackedDirectories() {
+        lock.lock()
+        let pending = directories
+        directories.removeAll()
+        lock.unlock()
+
+        for directory in pending {
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
 }
