@@ -6,10 +6,130 @@ private enum DoctorProbeFailure: Error {
     case invalidJSON
 }
 
+struct DoctorProjectCheckContext {
+    let profile: ProjectProfile
+    let fix: Bool
+    let schemeAvailable: Bool
+}
+
+struct DoctorGlobalCheckDescriptor: @unchecked Sendable {
+    let id: String
+    let run: (DoctorEngine, Bool) throws -> [DoctorCheck]
+}
+
+struct DoctorProjectCheckDescriptor: @unchecked Sendable {
+    let id: String
+    let run: (DoctorEngine, DoctorProjectCheckContext) throws -> [DoctorCheck]
+}
+
 final class DoctorEngine {
     private let environment: AppEnvironment
     private let store: StateStore
     private let profileLoader: ProfileLoader
+
+    static let globalCheckRegistry: [DoctorGlobalCheckDescriptor] = [
+        DoctorGlobalCheckDescriptor(id: "global.state_root") { engine, _ in
+            [try engine.stateRootHealthCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.free_disk_space") { engine, _ in
+            [engine.freeDiskSpaceCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.developer_dir_env_override") { engine, _ in
+            [try engine.developerDirEnvironmentOverrideCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.clt_vs_xcode_selection") { engine, _ in
+            [try engine.commandLineToolsSelectionCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.first_launch_components") { engine, _ in
+            [try engine.firstLaunchComponentsCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.iphonesimulator_sdk_present") { engine, _ in
+            [try engine.iPhoneSimulatorSDKPresenceCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.simulator_runtime_installed") { engine, _ in
+            [try engine.simulatorRuntimeInstalledCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.simulator_runtime_unavailable") { engine, _ in
+            [try engine.simulatorRuntimeUnavailableCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.runtime_dyld_cache_state") { engine, _ in
+            [try engine.runtimeDyldCacheStateCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.unavailable_devices_cleanup") { engine, fix in
+            [try engine.unavailableDevicesCleanupCheck(fix: fix)]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.coresim_list_json_health") { engine, _ in
+            [try engine.coreSimulatorListJSONHealthCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.concurrent_runner_contention") { engine, _ in
+            [try engine.concurrentRunnerContentionCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.disk_pressure_warning") { engine, _ in
+            [engine.diskPressureWarningCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.protected_path_warning") { engine, _ in
+            [engine.protectedPathWarningCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.xcode_cli_alignment") { engine, _ in
+            [try engine.xcodeCLIAlignmentCheck()]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.worker_lease") { engine, fix in
+            [try engine.workerLeaseHealthCheck(fix: fix)]
+        },
+        DoctorGlobalCheckDescriptor(id: "global.simulator_leases") { engine, fix in
+            [try engine.simulatorLeaseHealthCheck(fix: fix)]
+        },
+    ]
+
+    static let projectCheckRegistry: [DoctorProjectCheckDescriptor] = [
+        DoctorProjectCheckDescriptor(id: "project.repo_root") { engine, context in
+            [engine.repoRootCheck(profile: context.profile)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.project_path") { engine, context in
+            engine.projectPathCheck(profile: context.profile)
+        },
+        DoctorProjectCheckDescriptor(id: "project.scheme") { engine, context in
+            [engine.schemeCheck(profile: context.profile, schemeAvailable: context.schemeAvailable)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.showdestinations_runnable") { engine, context in
+            [try engine.showDestinationsRunnableCheck(profile: context.profile, schemeAvailable: context.schemeAvailable)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.testplan_exists") { engine, context in
+            [try engine.configuredTestPlanCheck(profile: context.profile, schemeAvailable: context.schemeAvailable)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.derived_data_isolation") { engine, context in
+            [engine.derivedDataIsolationCheck(profile: context.profile)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.xcode_managed_parallel_workers") { engine, context in
+            [engine.parallelCloneRiskCheck(profile: context.profile)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.package_resolution_preflight") { engine, context in
+            [try engine.packageResolutionPreflightCheck(profile: context.profile, schemeAvailable: context.schemeAvailable)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.xctestrun_integrity") { engine, context in
+            [try engine.xctestrunIntegrityCheck(profile: context.profile, schemeAvailable: context.schemeAvailable)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.xcresulttool_compat") { engine, _ in
+            [try engine.xcresulttoolCompatibilityCheck()]
+        },
+        DoctorProjectCheckDescriptor(id: "project.default_simulator_bootstatus") { engine, context in
+            guard let simulatorID = context.profile.defaultSimulatorID else {
+                return []
+            }
+            return [try engine.configuredSimulatorBootstatusCheck(profile: context.profile, simulatorID: simulatorID)]
+        },
+        DoctorProjectCheckDescriptor(id: "project.managed_simulator") { engine, context in
+            try engine.managedSimulatorCheck(profile: context.profile, fix: context.fix)
+        },
+    ]
+
+    static var globalCheckIDs: [String] {
+        globalCheckRegistry.map(\.id)
+    }
+
+    static var projectCheckIDs: [String] {
+        projectCheckRegistry.map(\.id)
+    }
 
     init(environment: AppEnvironment, store: StateStore) {
         self.environment = environment
@@ -36,44 +156,7 @@ final class DoctorEngine {
     }
 
     func run(project: String?, fix: Bool) throws -> DoctorReport {
-        var checks: [DoctorCheck] = []
-
-        do {
-            try environment.fileSystem.createDirectory(environment.paths.stateRoot)
-            checks.append(DoctorCheck(id: "global.state_root", status: .pass, message: "State root is available", autoFixable: false, fixed: false, manualAction: nil))
-        } catch {
-            checks.append(DoctorCheck(id: "global.state_root", status: .fail, message: "State root is unavailable", autoFixable: true, fixed: false, manualAction: "Create a writable state root"))
-        }
-
-        checks.append(try developerDirEnvironmentOverrideCheck())
-        checks.append(try commandLineToolsSelectionCheck())
-        checks.append(try firstLaunchComponentsCheck())
-        checks.append(try iPhoneSimulatorSDKPresenceCheck())
-        checks.append(try simulatorRuntimeInstalledCheck())
-        checks.append(try simulatorRuntimeUnavailableCheck())
-        checks.append(try coreSimulatorListJSONHealthCheck())
-        checks.append(try concurrentRunnerContentionCheck())
-        checks.append(try xcodeCLIAlignmentCheck())
-
-        var staleLeaseFixed = false
-        if try store.recoverStaleLeaseIfNeeded() {
-            staleLeaseFixed = true
-        } else if fix {
-            let legacy = environment.paths.stateRoot.appendingPathComponent("stale-lease.json")
-            if environment.fileSystem.fileExists(legacy) {
-                try environment.fileSystem.removeItem(legacy)
-                staleLeaseFixed = true
-            }
-        }
-        if staleLeaseFixed {
-            checks.append(DoctorCheck(id: "global.worker_lease", status: .pass, message: "Recovered stale worker lease", autoFixable: true, fixed: true, manualAction: nil))
-        } else if let lease = try store.currentLease(), !isPIDAlive(lease.pid) {
-            checks.append(DoctorCheck(id: "global.worker_lease", status: .fail, message: "Stale worker lease detected", autoFixable: true, fixed: false, manualAction: "Run doctor --fix"))
-        } else if environment.fileSystem.fileExists(environment.paths.stateRoot.appendingPathComponent("stale-lease.json")) {
-            checks.append(DoctorCheck(id: "global.worker_lease", status: .fail, message: "Legacy stale lease marker detected", autoFixable: true, fixed: false, manualAction: "Run doctor --fix"))
-        } else {
-            checks.append(DoctorCheck(id: "global.worker_lease", status: .pass, message: "No stale worker lease detected", autoFixable: false, fixed: false, manualAction: nil))
-        }
+        var checks = try runGlobalChecks(fix: fix)
 
         if let project {
             let profile = try profileLoader.loadProfile(named: project)
@@ -93,17 +176,171 @@ final class DoctorEngine {
         return report
     }
 
+    private func runGlobalChecks(fix: Bool) throws -> [DoctorCheck] {
+        try Self.globalCheckRegistry.flatMap { descriptor in
+            try descriptor.run(self, fix)
+        }
+    }
+
+    private func stateRootHealthCheck() throws -> DoctorCheck {
+        do {
+            try environment.fileSystem.createDirectory(environment.paths.stateRoot)
+            return DoctorCheck(id: "global.state_root", status: .pass, message: "State root is available", autoFixable: false, fixed: false, manualAction: nil)
+        } catch {
+            return DoctorCheck(id: "global.state_root", status: .fail, message: "State root is unavailable", autoFixable: true, fixed: false, manualAction: "Create a writable state root")
+        }
+    }
+
+    private func workerLeaseHealthCheck(fix: Bool) throws -> DoctorCheck {
+        var staleLeaseFixed = false
+        if try store.recoverStaleLeaseIfNeeded() {
+            staleLeaseFixed = true
+        } else if fix {
+            let legacy = environment.paths.stateRoot.appendingPathComponent("stale-lease.json")
+            if environment.fileSystem.fileExists(legacy) {
+                try environment.fileSystem.removeItem(legacy)
+                staleLeaseFixed = true
+            }
+        }
+        if staleLeaseFixed {
+            return DoctorCheck(id: "global.worker_lease", status: .pass, message: "Recovered stale worker lease", autoFixable: true, fixed: true, manualAction: nil)
+        }
+        if let lease = try store.currentLease(), !isPIDAlive(lease.pid) {
+            return DoctorCheck(id: "global.worker_lease", status: .fail, message: "Stale worker lease detected", autoFixable: true, fixed: false, manualAction: "Run doctor --fix")
+        }
+        if environment.fileSystem.fileExists(environment.paths.stateRoot.appendingPathComponent("stale-lease.json")) {
+            return DoctorCheck(id: "global.worker_lease", status: .fail, message: "Legacy stale lease marker detected", autoFixable: true, fixed: false, manualAction: "Run doctor --fix")
+        }
+        return DoctorCheck(id: "global.worker_lease", status: .pass, message: "No stale worker lease detected", autoFixable: false, fixed: false, manualAction: nil)
+    }
+
+    private func freeDiskSpaceCheck() -> DoctorCheck {
+        let path = environment.paths.stateRoot.path
+        let failThreshold = diskThresholdBytes(
+            environmentKey: "XCSTEWARD_DOCTOR_MIN_FREE_BYTES",
+            defaultBytes: 2 * 1024 * 1024 * 1024
+        )
+        let warnThreshold = diskThresholdBytes(
+            environmentKey: "XCSTEWARD_DOCTOR_WARN_FREE_BYTES",
+            defaultBytes: 10 * 1024 * 1024 * 1024
+        )
+
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: path)
+            guard let freeBytes = attributes[.systemFreeSize] as? NSNumber else {
+                return DoctorCheck(
+                    id: "global.free_disk_space",
+                    status: .warn,
+                    message: "Unable to read available disk space for \(path)",
+                    autoFixable: false,
+                    fixed: false,
+                    manualAction: "Check free disk space manually before running simulator tests"
+                )
+            }
+
+            let available = freeBytes.int64Value
+            if available < failThreshold {
+                return DoctorCheck(
+                    id: "global.free_disk_space",
+                    status: .fail,
+                    message: "Only \(formatBytes(available)) free on the XCSteward state volume",
+                    autoFixable: false,
+                    fixed: false,
+                    manualAction: "Free at least \(formatBytes(failThreshold)) before running SwiftPM or simulator jobs"
+                )
+            }
+            if available < warnThreshold {
+                return DoctorCheck(
+                    id: "global.free_disk_space",
+                    status: .warn,
+                    message: "Only \(formatBytes(available)) free on the XCSteward state volume",
+                    autoFixable: false,
+                    fixed: false,
+                    manualAction: "Free disk space before long simulator runs to avoid xcodebuild or SwiftPM I/O failures"
+                )
+            }
+
+            return DoctorCheck(
+                id: "global.free_disk_space",
+                status: .pass,
+                message: "\(formatBytes(available)) free on the XCSteward state volume",
+                autoFixable: false,
+                fixed: false,
+                manualAction: nil
+            )
+        } catch {
+            return DoctorCheck(
+                id: "global.free_disk_space",
+                status: .warn,
+                message: "Unable to inspect disk space for \(path)",
+                autoFixable: false,
+                fixed: false,
+                manualAction: "Check free disk space manually before running simulator tests"
+            )
+        }
+    }
+
+    private func simulatorLeaseHealthCheck(fix: Bool) throws -> DoctorCheck {
+        let staleLeases = try store.listSimulatorLeases().filter { !isPIDAlive($0.pid) }
+        guard !staleLeases.isEmpty else {
+            let activeCount = try store.listSimulatorLeases().count
+            return DoctorCheck(
+                id: "global.simulator_leases",
+                status: .pass,
+                message: activeCount == 0
+                    ? "No simulator leases are recorded"
+                    : "\(activeCount) active simulator lease\(activeCount == 1 ? "" : "s") recorded",
+                autoFixable: false,
+                fixed: false,
+                manualAction: nil
+            )
+        }
+        if fix {
+            let recovered = try store.recoverStaleSimulatorLeases()
+            return DoctorCheck(
+                id: "global.simulator_leases",
+                status: .pass,
+                message: "Recovered \(recovered) stale simulator lease\(recovered == 1 ? "" : "s")",
+                autoFixable: true,
+                fixed: true,
+                manualAction: nil
+            )
+        }
+        let simulatorIDs = staleLeases.map(\.simulatorID).joined(separator: ", ")
+        return DoctorCheck(
+            id: "global.simulator_leases",
+            status: .fail,
+            message: "Stale simulator lease\(staleLeases.count == 1 ? "" : "s") detected: \(simulatorIDs)",
+            autoFixable: true,
+            fixed: false,
+            manualAction: "Run doctor --fix to remove simulator leases owned by dead XCSteward processes"
+        )
+    }
+
     private func projectChecks(profile: ProjectProfile, fix: Bool) throws -> [DoctorCheck] {
-        var checks: [DoctorCheck] = []
-        let repoURL = URL(fileURLWithPath: profile.repoRoot)
+        let schemeAvailable = try isSchemeAvailable(profile: profile)
+        let context = DoctorProjectCheckContext(profile: profile, fix: fix, schemeAvailable: schemeAvailable)
+        return try Self.projectCheckRegistry.flatMap { descriptor in
+            try descriptor.run(self, context)
+        }
+    }
+
+    private func repoRootCheck(profile: ProjectProfile) -> DoctorCheck {
         if environment.fileSystem.fileExists(URL(fileURLWithPath: profile.repoRoot)) {
-            checks.append(DoctorCheck(id: "project.repo_root", status: .pass, message: "Repo root exists", autoFixable: false, fixed: false, manualAction: nil))
-        } else {
-            checks.append(DoctorCheck(id: "project.repo_root", status: .fail, message: "Repo root is missing", autoFixable: false, fixed: false, manualAction: "Restore the repository at \(profile.repoRoot)"))
+            return DoctorCheck(id: "project.repo_root", status: .pass, message: "Repo root exists", autoFixable: false, fixed: false, manualAction: nil)
         }
+        return DoctorCheck(id: "project.repo_root", status: .fail, message: "Repo root is missing", autoFixable: false, fixed: false, manualAction: "Restore the repository at \(profile.repoRoot)")
+    }
+
+    private func projectPathCheck(profile: ProjectProfile) -> [DoctorCheck] {
+        let repoURL = URL(fileURLWithPath: profile.repoRoot)
         if let projectPath = profile.projectPath, environment.fileSystem.fileExists(repoURL.appendingPathComponent(projectPath)) {
-            checks.append(DoctorCheck(id: "project.project_path", status: .pass, message: "Project path exists", autoFixable: false, fixed: false, manualAction: nil))
+            return [DoctorCheck(id: "project.project_path", status: .pass, message: "Project path exists", autoFixable: false, fixed: false, manualAction: nil)]
         }
+        return []
+    }
+
+    private func isSchemeAvailable(profile: ProjectProfile) throws -> Bool {
         let schemes = try environment.toolRunner.run(
             tool: "xcodebuild",
             arguments: xcodebuildProjectArguments(for: profile, includeScheme: false) + ["-list", "-json"],
@@ -111,34 +348,68 @@ final class DoctorEngine {
             workingDirectory: profile.workingDirectory,
             timeout: profile.timeouts.build
         )
-        let schemeAvailable = schemes.exitCode == 0 &&
+        return schemes.exitCode == 0 &&
             availableSchemes(from: schemes.output).contains(profile.scheme)
+    }
+
+    private func schemeCheck(profile: ProjectProfile, schemeAvailable: Bool) -> DoctorCheck {
         if schemeAvailable {
-            checks.append(DoctorCheck(id: "project.scheme", status: .pass, message: "Scheme is available", autoFixable: false, fixed: false, manualAction: nil))
-        } else {
-            checks.append(DoctorCheck(id: "project.scheme", status: .fail, message: "Scheme is missing", autoFixable: false, fixed: false, manualAction: "Regenerate or share the expected scheme"))
+            return DoctorCheck(id: "project.scheme", status: .pass, message: "Scheme is available", autoFixable: false, fixed: false, manualAction: nil)
         }
-        checks.append(try showDestinationsRunnableCheck(profile: profile, schemeAvailable: schemeAvailable))
-        checks.append(try configuredTestPlanCheck(profile: profile, schemeAvailable: schemeAvailable))
-        checks.append(derivedDataIsolationCheck(profile: profile))
-        checks.append(try packageResolutionPreflightCheck(profile: profile, schemeAvailable: schemeAvailable))
-        checks.append(try xcresulttoolCompatibilityCheck())
-        if let defaultSimulatorID = profile.defaultSimulatorID {
-            checks.append(try configuredSimulatorBootstatusCheck(profile: profile, simulatorID: defaultSimulatorID))
+        return DoctorCheck(id: "project.scheme", status: .fail, message: "Scheme is missing", autoFixable: false, fixed: false, manualAction: "Regenerate or share the expected scheme")
+    }
+
+    private func managedSimulatorCheck(profile: ProjectProfile, fix: Bool) throws -> [DoctorCheck] {
+        guard let managed = profile.managedSimulator else {
+            return []
         }
-        if let managed = profile.managedSimulator {
-            let list = try environment.toolRunner.run(tool: "xcrun", arguments: ["simctl", "list", "devices"], environment: profile.env, workingDirectory: profile.workingDirectory, timeout: profile.timeouts.boot)
-            if list.output.contains(managed.name) || list.output.contains(profile.defaultSimulatorID ?? "") {
-                checks.append(DoctorCheck(id: "project.managed_simulator", status: .pass, message: "Managed simulator exists", autoFixable: true, fixed: false, manualAction: nil))
-            } else if fix {
-                let create = try environment.toolRunner.run(tool: "xcrun", arguments: ["simctl", "create", managed.name, managed.deviceType, managed.runtime], environment: profile.env, workingDirectory: profile.workingDirectory, timeout: profile.timeouts.boot)
-                let fixed = create.exitCode == 0
-                checks.append(DoctorCheck(id: "project.managed_simulator", status: fixed ? .pass : .fail, message: fixed ? "Managed simulator created" : "Unable to create managed simulator", autoFixable: true, fixed: fixed, manualAction: fixed ? nil : "Create the simulator manually"))
-            } else {
-                checks.append(DoctorCheck(id: "project.managed_simulator", status: .fail, message: "Managed simulator is missing", autoFixable: true, fixed: false, manualAction: "Run doctor --fix"))
+        let context = ToolExecutionContext(profile: profile, jobID: "doctor", store: store)
+        let lifecycle = SimulatorLifecycle(environment: environment, tooling: self)
+        if try lifecycle.existingManagedSimulatorID(managed, context: context) != nil {
+            return [DoctorCheck(id: "project.managed_simulator", status: .pass, message: "Managed simulator exists", autoFixable: true, fixed: false, manualAction: nil)]
+        }
+        if fix {
+            do {
+                _ = try lifecycle.createManagedSimulator(managed, context: context)
+                return [DoctorCheck(id: "project.managed_simulator", status: .pass, message: "Managed simulator created", autoFixable: true, fixed: true, manualAction: nil)]
+            } catch {
+                return [DoctorCheck(id: "project.managed_simulator", status: .fail, message: "Unable to create managed simulator", autoFixable: true, fixed: false, manualAction: "Create the simulator manually")]
             }
         }
-        return checks
+        return [DoctorCheck(id: "project.managed_simulator", status: .fail, message: "Managed simulator is missing", autoFixable: true, fixed: false, manualAction: "Run doctor --fix")]
+    }
+
+    private func parallelCloneRiskCheck(profile: ProjectProfile) -> DoctorCheck {
+        switch profile.parallel.mode {
+        case .serial, .manualShards:
+            return DoctorCheck(
+                id: "project.xcode_managed_parallel_workers",
+                status: .pass,
+                message: "Parallel configuration avoids Xcode-managed clone simulators",
+                autoFixable: false,
+                fixed: false,
+                manualAction: nil
+            )
+        case .xcodeManaged, .hybrid:
+            guard profile.parallel.maxWorkers > 1 else {
+                return DoctorCheck(
+                    id: "project.xcode_managed_parallel_workers",
+                    status: .pass,
+                    message: "Xcode-managed parallelism is limited to one worker",
+                    autoFixable: false,
+                    fixed: false,
+                    manualAction: nil
+                )
+            }
+            return DoctorCheck(
+                id: "project.xcode_managed_parallel_workers",
+                status: .warn,
+                message: "Xcode-managed parallelism may create clone simulators that doctor cannot fully preflight",
+                autoFixable: false,
+                fixed: false,
+                manualAction: "Use [parallel] max_workers = 1 or mode = \"serial\" for deterministic local simulator runs; opt into higher worker counts only after a live smoke job proves clone launch stability"
+            )
+        }
     }
 
     private func configuredSimulatorBootstatusCheck(profile: ProjectProfile, simulatorID: String) throws -> DoctorCheck {
@@ -431,6 +702,66 @@ final class DoctorEngine {
             autoFixable: false,
             fixed: false,
             manualAction: nil
+        )
+    }
+
+    private func xctestrunIntegrityCheck(profile: ProjectProfile, schemeAvailable: Bool) throws -> DoctorCheck {
+        guard schemeAvailable else {
+            return makeCheck(
+                id: "project.xctestrun_integrity",
+                status: .pass,
+                message: ".xctestrun integrity check skipped because the configured scheme is unavailable"
+            )
+        }
+
+        let root = environment.paths.doctorRoot
+            .appendingPathComponent("xctestrun-integrity")
+            .appendingPathComponent(profile.name)
+        let derivedData = root.appendingPathComponent("DerivedData")
+        try? environment.fileSystem.removeItem(root)
+        try environment.fileSystem.createDirectory(root)
+
+        var arguments = xcodebuildProjectArguments(for: profile, includeScheme: true)
+        arguments += [
+            "-destination", "generic/platform=iOS Simulator",
+            "-derivedDataPath", derivedData.path,
+        ]
+        if let testPlan = profile.defaultTestPlan, !testPlan.isEmpty {
+            arguments += ["-testPlan", testPlan]
+        }
+        arguments.append("build-for-testing")
+
+        let build = try environment.toolRunner.run(
+            tool: "xcodebuild",
+            arguments: arguments,
+            environment: profile.env,
+            workingDirectory: profile.workingDirectory,
+            timeout: profile.timeouts.build
+        )
+        guard build.exitCode == 0, !build.timedOut else {
+            return makeCheck(
+                id: "project.xctestrun_integrity",
+                status: .fail,
+                message: "build-for-testing failed while validating .xctestrun generation",
+                manualAction: "Run xcodebuild build-for-testing for the configured scheme and fix the reported build issue"
+            )
+        }
+
+        let productsRoot = derivedData.appendingPathComponent("Build/Products")
+        let xctestrunFiles = findXCTestRunFiles(under: productsRoot)
+        guard let xctestrun = xctestrunFiles.first else {
+            return makeCheck(
+                id: "project.xctestrun_integrity",
+                status: .fail,
+                message: "build-for-testing completed but did not produce a .xctestrun file",
+                manualAction: "Inspect \(productsRoot.path) and verify the scheme has test targets enabled for build-for-testing"
+            )
+        }
+
+        return makeCheck(
+            id: "project.xctestrun_integrity",
+            status: .pass,
+            message: ".xctestrun generated successfully at \(xctestrun.lastPathComponent)"
         )
     }
 
@@ -821,6 +1152,118 @@ final class DoctorEngine {
         )
     }
 
+    private func runtimeDyldCacheStateCheck() throws -> DoctorCheck {
+        if let skipped = try skippedSimctlDependentCheck(
+            id: "global.runtime_dyld_cache_state",
+            summary: "Simulator runtime dyld cache state"
+        ) {
+            return skipped
+        }
+
+        let runtimes: [[String: Any]]
+        switch try runSimulatorRuntimesProbe() {
+        case .success(let parsedRuntimes):
+            runtimes = parsedRuntimes
+        case .failure:
+            return makeCheck(
+                id: "global.runtime_dyld_cache_state",
+                status: .warn,
+                message: "Unable to inspect Simulator runtime dyld cache state",
+                manualAction: "Run xcrun simctl list runtimes --json and inspect runtime availability errors manually"
+            )
+        }
+
+        let dyldFailures = runtimes.filter { runtime in
+            isIOSRuntime(runtime) && runtimeAvailabilityText(runtime).localizedCaseInsensitiveContains("dyld")
+        }
+        guard !dyldFailures.isEmpty else {
+            return makeCheck(
+                id: "global.runtime_dyld_cache_state",
+                status: .pass,
+                message: "No Simulator runtime dyld cache errors were detected"
+            )
+        }
+
+        let names = dyldFailures
+            .map { ($0["name"] as? String) ?? ($0["identifier"] as? String) ?? "unknown runtime" }
+            .prefix(3)
+            .joined(separator: ", ")
+        return makeCheck(
+            id: "global.runtime_dyld_cache_state",
+            status: .fail,
+            message: "Simulator runtimes report dyld cache errors: \(names)",
+            manualAction: "Reinstall the affected iOS Simulator runtime or refresh Xcode runtime support before running simulator jobs"
+        )
+    }
+
+    private func unavailableDevicesCleanupCheck(fix: Bool) throws -> DoctorCheck {
+        if let skipped = try skippedSimctlDependentCheck(
+            id: "global.unavailable_devices_cleanup",
+            summary: "unavailable Simulator device cleanup"
+        ) {
+            return skipped
+        }
+
+        let devicesJSON: [String: Any]
+        switch try runJSONProbe(tool: "xcrun", arguments: ["simctl", "list", "devices", "--json"], timeout: 10) {
+        case .success(let json):
+            devicesJSON = json
+        case .failure:
+            return makeCheck(
+                id: "global.unavailable_devices_cleanup",
+                status: .warn,
+                message: "Unable to inspect unavailable Simulator devices",
+                autoFixable: true,
+                manualAction: "Run xcrun simctl delete unavailable after verifying CoreSimulator can list devices"
+            )
+        }
+
+        let unavailableDevices = unavailableSimulatorDevices(in: devicesJSON)
+        guard !unavailableDevices.isEmpty else {
+            return makeCheck(
+                id: "global.unavailable_devices_cleanup",
+                status: .pass,
+                message: "No unavailable Simulator devices were detected",
+                autoFixable: true
+            )
+        }
+
+        if fix {
+            let delete = try environment.toolRunner.run(
+                tool: "xcrun",
+                arguments: ["simctl", "delete", "unavailable"],
+                environment: [:],
+                workingDirectory: nil,
+                timeout: 30
+            )
+            guard delete.exitCode == 0, !delete.timedOut else {
+                return makeCheck(
+                    id: "global.unavailable_devices_cleanup",
+                    status: .fail,
+                    message: "Unable to delete unavailable Simulator devices",
+                    autoFixable: true,
+                    manualAction: "Run xcrun simctl delete unavailable manually and inspect CoreSimulator errors"
+                )
+            }
+            return makeCheck(
+                id: "global.unavailable_devices_cleanup",
+                status: .pass,
+                message: "Deleted \(unavailableDevices.count) unavailable Simulator device\(unavailableDevices.count == 1 ? "" : "s")",
+                autoFixable: true,
+                fixed: true
+            )
+        }
+
+        let names = unavailableDevices.prefix(3).joined(separator: ", ")
+        return makeCheck(
+            id: "global.unavailable_devices_cleanup",
+            status: .warn,
+            message: "Unavailable Simulator devices were detected: \(names)",
+            autoFixable: true,
+            manualAction: "Run doctor --fix to execute xcrun simctl delete unavailable"
+        )
+    }
+
     private func coreSimulatorListJSONHealthCheck() throws -> DoctorCheck {
         if let skipped = try skippedSimctlDependentCheck(
             id: "global.coresim_list_json_health",
@@ -912,6 +1355,66 @@ final class DoctorEngine {
             autoFixable: false,
             fixed: false,
             manualAction: "Wait for the competing simulator activity to finish or route it through XCSteward"
+        )
+    }
+
+    private func diskPressureWarningCheck() -> DoctorCheck {
+        let path = environment.paths.stateRoot.path
+        let warnPercent = diskThresholdPercent(
+            environmentKey: "XCSTEWARD_DOCTOR_WARN_FREE_PERCENT",
+            defaultPercent: 10
+        )
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: path)
+            guard let free = attributes[.systemFreeSize] as? NSNumber,
+                  let total = attributes[.systemSize] as? NSNumber,
+                  total.int64Value > 0 else {
+                return makeCheck(
+                    id: "global.disk_pressure_warning",
+                    status: .warn,
+                    message: "Unable to read disk pressure for the XCSteward state volume",
+                    manualAction: "Check available disk capacity manually before running simulator jobs"
+                )
+            }
+
+            let freePercent = (Double(free.int64Value) / Double(total.int64Value)) * 100
+            if freePercent < Double(warnPercent) {
+                return makeCheck(
+                    id: "global.disk_pressure_warning",
+                    status: .warn,
+                    message: "Disk pressure is elevated on the XCSteward state volume (\(formatPercent(freePercent)) free)",
+                    manualAction: "Free disk space before running parallel simulator jobs; CoreSimulator and result bundles are I/O intensive"
+                )
+            }
+            return makeCheck(
+                id: "global.disk_pressure_warning",
+                status: .pass,
+                message: "Disk pressure is acceptable on the XCSteward state volume (\(formatPercent(freePercent)) free)"
+            )
+        } catch {
+            return makeCheck(
+                id: "global.disk_pressure_warning",
+                status: .warn,
+                message: "Unable to inspect disk pressure for \(path)",
+                manualAction: "Check available disk capacity manually before running simulator jobs"
+            )
+        }
+    }
+
+    private func protectedPathWarningCheck() -> DoctorCheck {
+        let path = normalizePath(environment.paths.stateRoot.path)
+        if let matched = protectedPathPrefix(for: path) {
+            return makeCheck(
+                id: "global.protected_path_warning",
+                status: .warn,
+                message: "XCSteward state root is under a protected or high-risk path: \(matched)",
+                manualAction: "Move XCSTEWARD_HOME or --state-root to an unprotected developer-owned path such as ~/.xcsteward"
+            )
+        }
+        return makeCheck(
+            id: "global.protected_path_warning",
+            status: .pass,
+            message: "XCSteward state root is not under a known protected path"
         )
     }
 
@@ -1113,6 +1616,63 @@ final class DoctorEngine {
         runtime["isAvailable"] as? Bool == true
     }
 
+    private func runtimeAvailabilityText(_ runtime: [String: Any]) -> String {
+        [
+            runtime["availabilityError"] as? String,
+            runtime["availability_error"] as? String,
+            runtime["error"] as? String,
+            runtime["state"] as? String,
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
+
+    private func unavailableSimulatorDevices(in json: [String: Any]) -> [String] {
+        guard let devicesByRuntime = json["devices"] as? [String: Any] else {
+            return []
+        }
+        var unavailable: [String] = []
+        for value in devicesByRuntime.values {
+            guard let devices = value as? [[String: Any]] else {
+                continue
+            }
+            for device in devices where isUnavailableSimulatorDevice(device) {
+                let name = device["name"] as? String
+                let udid = device["udid"] as? String
+                unavailable.append([name, udid].compactMap { $0 }.joined(separator: " "))
+            }
+        }
+        return unavailable
+    }
+
+    private func isUnavailableSimulatorDevice(_ device: [String: Any]) -> Bool {
+        if let available = device["isAvailable"] as? Bool, !available {
+            return true
+        }
+        if let state = device["state"] as? String, state.localizedCaseInsensitiveContains("unavailable") {
+            return true
+        }
+        if let availabilityError = device["availabilityError"] as? String, !availabilityError.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    private func findXCTestRunFiles(under root: URL) -> [URL] {
+        guard let entries = try? environment.fileSystem.contentsOfDirectory(root) else {
+            return []
+        }
+        var matches: [URL] = []
+        for entry in entries {
+            if entry.pathExtension == "xctestrun" {
+                matches.append(entry)
+            } else {
+                matches.append(contentsOf: findXCTestRunFiles(under: entry))
+            }
+        }
+        return matches.sorted { $0.path < $1.path }
+    }
+
     private func skippedSimctlDependentCheck(id: String, summary: String) throws -> DoctorCheck? {
         let select = try selectedDeveloperDirectory()
         guard select.exitCode == 0 else {
@@ -1182,8 +1742,103 @@ final class DoctorEngine {
         return plist["CFBundleShortVersionString"] as? String
     }
 
+    private func diskThresholdBytes(environmentKey: String, defaultBytes: Int64) -> Int64 {
+        guard let rawValue = environment.processInfo.environment[environmentKey],
+              let parsed = Int64(rawValue),
+              parsed >= 0
+        else {
+            return defaultBytes
+        }
+        return parsed
+    }
+
+    private func diskThresholdPercent(environmentKey: String, defaultPercent: Int) -> Int {
+        guard let rawValue = environment.processInfo.environment[environmentKey],
+              let parsed = Int(rawValue),
+              parsed >= 0
+        else {
+            return defaultPercent
+        }
+        return parsed
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    private func formatPercent(_ value: Double) -> String {
+        String(format: "%.1f%%", value)
+    }
+
+    private func protectedPathPrefix(for path: String) -> String? {
+        protectedPathPrefixes().first { prefix in
+            path == prefix || path.hasPrefix(prefix + "/")
+        }
+    }
+
+    private func protectedPathPrefixes() -> [String] {
+        var prefixes = [
+            "/Applications",
+            "/Library",
+            "/System",
+            "/bin",
+            "/sbin",
+            "/usr",
+            "/private/var/root",
+            "/var/root",
+        ]
+        if let home = environment.processInfo.environment["HOME"] {
+            let normalizedHome = normalizePath(home)
+            prefixes += [
+                "\(normalizedHome)/Desktop",
+                "\(normalizedHome)/Documents",
+                "\(normalizedHome)/Downloads",
+                "\(normalizedHome)/Library/Mobile Documents",
+            ]
+        }
+        if let extra = environment.processInfo.environment["XCSTEWARD_DOCTOR_PROTECTED_PATHS"] {
+            prefixes += extra
+                .split(separator: ":")
+                .map(String.init)
+                .map(normalizePath)
+        }
+        return prefixes.map(normalizePath)
+    }
+
     private func normalizePath(_ output: String) -> String {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+    }
+}
+
+extension DoctorEngine: SimulatorLifecycleTooling {
+    func runTool(
+        tool: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String]
+    ) throws -> ToolResult {
+        try environment.toolRunner.run(
+            tool: tool,
+            arguments: arguments,
+            environment: context.profile.env.merging(environmentOverrides) { _, override in override },
+            workingDirectory: context.profile.workingDirectory,
+            timeout: timeout
+        )
+    }
+
+    func throwIfCanceled(_ result: ToolResult, context: ToolExecutionContext) throws {}
+
+    func commandFailed(_ message: String, output: String) -> XCStewardError {
+        let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .commandFailed(detail.isEmpty ? message : "\(message): \(detail)")
+    }
+
+    func failAndLog(message: String, exitCode: Int32, logURL: URL, combinedLog: URL) throws -> ToolResult {
+        ToolResult(exitCode: exitCode, output: message, timedOut: false)
     }
 }
