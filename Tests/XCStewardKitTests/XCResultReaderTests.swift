@@ -15,6 +15,27 @@ final class XCResultReaderTests: XCTestCase {
         XCTAssertEqual(modern.testsSkippedCount, 1)
     }
 
+    func testParserDecodesNestedStringSummaryCounts() throws {
+        let data = Data(
+            """
+            {
+              "metadata": {"formatVersion": "future"},
+              "metrics": {
+                "totalTestCount": "5",
+                "failedTests": "1",
+                "skippedTests": "2"
+              }
+            }
+            """.utf8
+        )
+
+        let summary = try XCTUnwrap(XCResultParser().summary(from: data))
+
+        XCTAssertEqual(summary.testsCount, 5)
+        XCTAssertEqual(summary.testsFailedCount, 1)
+        XCTAssertEqual(summary.testsSkippedCount, 2)
+    }
+
     func testParserExtractsTimingSamplesFromNestedJSON() throws {
         let data = Data(
             """
@@ -25,6 +46,25 @@ final class XCResultReaderTests: XCTestCase {
                   {"name": "DemoTests/BarTests/testB", "time_seconds": "2.5"},
                   {"identifier": "IgnoredWithoutDuration"}
                 ]}
+              ]
+            }
+            """.utf8
+        )
+
+        let timings = try XCResultParser().testTimingSamples(from: data)
+
+        XCTAssertEqual(timings.map(\.identifier), ["DemoTests/BarTests/testB", "DemoTests/FooTests/testA"])
+        XCTAssertEqual(timings.map(\.durationSeconds), [2.5, 1.25])
+    }
+
+    func testParserConvertsMillisecondTimingsAndRejectsBooleanDurations() throws {
+        let data = Data(
+            """
+            {
+              "tests": [
+                {"identifier": "DemoTests/FooTests/testA", "duration_ms": 1250},
+                {"identifier": "DemoTests/BarTests/testB", "durationMilliseconds": "2500"},
+                {"identifier": "DemoTests/BazTests/testC", "duration": true}
               ]
             }
             """.utf8

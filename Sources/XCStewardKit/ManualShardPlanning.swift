@@ -65,28 +65,48 @@ struct ManualShardPlanner: Sendable {
         var identifiers: [String] = []
         var seen: Set<String> = []
 
-        func append(_ value: String) {
+        func append(_ value: String, requireQualifiedIdentifier: Bool = false) {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty, !seen.contains(trimmed) else {
+                return
+            }
+            if requireQualifiedIdentifier, !isQualifiedTestIdentifier(trimmed) {
                 return
             }
             seen.insert(trimmed)
             identifiers.append(trimmed)
         }
 
-        func walk(_ value: Any) {
+        func canHoldQualifiedIdentifier(_ key: String) -> Bool {
+            key == "name" || key == "tests" || key == "test" || key.contains("testname")
+        }
+
+        func walk(_ value: Any, stringRequiresQualifiedIdentifier: Bool? = nil) {
+            if let string = value as? String {
+                guard let requiresQualifiedIdentifier = stringRequiresQualifiedIdentifier else {
+                    return
+                }
+                append(string, requireQualifiedIdentifier: requiresQualifiedIdentifier)
+                return
+            }
             if let array = value as? [Any] {
-                array.forEach(walk)
+                for child in array {
+                    walk(child, stringRequiresQualifiedIdentifier: stringRequiresQualifiedIdentifier)
+                }
                 return
             }
             guard let object = value as? [String: Any] else {
                 return
             }
             for (key, child) in object {
-                if key.lowercased().contains("identifier"), let identifier = child as? String {
-                    append(identifier)
+                let normalizedKey = key.lowercased()
+                if normalizedKey.contains("identifier") {
+                    walk(child, stringRequiresQualifiedIdentifier: false)
+                } else if canHoldQualifiedIdentifier(normalizedKey) {
+                    walk(child, stringRequiresQualifiedIdentifier: true)
+                } else {
+                    walk(child)
                 }
-                walk(child)
             }
         }
 
@@ -173,6 +193,11 @@ struct ManualShardPlanner: Sendable {
             result.append(trimmed)
         }
         return result
+    }
+
+    private func isQualifiedTestIdentifier(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count >= 2 && parts.allSatisfy { !$0.isEmpty }
     }
 }
 

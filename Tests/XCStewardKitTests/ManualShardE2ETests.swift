@@ -54,4 +54,29 @@ final class ManualShardE2ETests: XCTestCase {
             XCTAssertTrue(line.contains("-only-testing:"))
         }
     }
+
+    func testManualShardFatalFailureTerminatesPeerShard() throws {
+        let e2e = try E2EScenario(scenario: .manualShardFatalShortCircuit)
+        try e2e.writeProfile(
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            allowed_simulator_ids = ["SIM-456"]
+            [parallel]
+            mode = "manual-shards"
+            shard_count = 2
+            """
+        )
+
+        let json = try e2e.submitJSON(wait: true)
+
+        XCTAssertEqual(json["state"] as? String, "failed")
+        XCTAssertEqual(json["result_class"] as? String, "runner_bootstrap_failure")
+        let jobID = try e2e.jobID(from: json)
+        let artifacts = try XCTUnwrap(json["artifacts"] as? [String: Any])
+        let diagnostics = try e2e.manualRunDiagnostics(from: artifacts)
+        XCTAssertTrue(diagnostics.shards.contains { $0["result_class"] as? String == "runner_bootstrap_failure" })
+        XCTAssertTrue(try e2e.logs(jobID).contains("Stopping manual shard peers after shard-000 produced runner_bootstrap_failure"))
+    }
 }

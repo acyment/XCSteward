@@ -12,6 +12,8 @@ private final class ManualShardRunState: @unchecked Sendable {
     private let lock = NSLock()
     private var results: [ManualShardExecutionResult] = []
     private var firstError: Error?
+    private var stopLaunching = false
+    private var activeProcessIDs: Set<Int32> = []
 
     func append(_ result: ManualShardExecutionResult) {
         lock.lock()
@@ -19,11 +21,46 @@ private final class ManualShardRunState: @unchecked Sendable {
         lock.unlock()
     }
 
-    func record(error: Error) {
+    func record(error: Error) -> [Int32] {
         lock.lock()
+        defer { lock.unlock() }
         if firstError == nil {
             firstError = error
         }
+        stopLaunching = true
+        return Array(activeProcessIDs)
+    }
+
+    func requestStopForFatalShardResult(_ result: ManualShardExecutionResult) -> [Int32] {
+        requestStopForFatalResultClass(result.outcome.resultClass)
+    }
+
+    func requestStopForFatalResultClass(_ resultClass: ResultClass) -> [Int32] {
+        guard resultClass.isManualShardFatal else {
+            return []
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        stopLaunching = true
+        return Array(activeProcessIDs)
+    }
+
+    func shouldStopLaunching() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopLaunching
+    }
+
+    func recordActiveProcess(_ pid: Int32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        activeProcessIDs.insert(pid)
+        return stopLaunching
+    }
+
+    func clearActiveProcess(_ pid: Int32) {
+        lock.lock()
+        activeProcessIDs.remove(pid)
         lock.unlock()
     }
 
@@ -31,6 +68,17 @@ private final class ManualShardRunState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (results, firstError)
+    }
+}
+
+private extension ResultClass {
+    var isManualShardFatal: Bool {
+        switch self {
+        case .runnerBootstrapFailure, .artifactFailure, .internalError:
+            return true
+        case .success, .buildFailure, .testFailure, .testTimeout, .canceled:
+            return false
+        }
     }
 }
 
@@ -52,6 +100,7 @@ final class ManualShardRunner: @unchecked Sendable {
         request: JobRequest,
         context: ToolExecutionContext
     ) throws -> ManualRunResult {
+        let manualRunStartedAt = environment.clock.now().timeIntervalSince1970
         let profile = context.profile
         guard let testReference = runtime.resolveTestProductReference(
             in: paths,
@@ -156,6 +205,9 @@ final class ManualShardRunner: @unchecked Sendable {
             group.enter()
             queue.async {
                 defer { group.leave() }
+                guard !state.shouldStopLaunching() else {
+                    return
+                }
                 do {
                     let shardContext = ToolExecutionContext(
                         profile: profile,
@@ -173,11 +225,22 @@ final class ManualShardRunner: @unchecked Sendable {
                         totalShards: shardGroups.count,
                         shardPaths: shardPaths,
                         combinedLog: paths.combinedLog,
-                        context: shardContext
+                        context: shardContext,
+                        state: state
                     )
                     state.append(result)
+                    if result.outcome.resultClass.isManualShardFatal {
+                        self.terminateManualShardProcesses(
+                            state.requestStopForFatalShardResult(result),
+                            context: shardContext
+                        )
+                    }
                 } catch {
-                    state.record(error: error)
+                    self.terminateManualShardProcesses(
+                        state.record(error: error),
+                        jobID: jobID,
+                        stateRoot: self.environment.paths.stateRoot.path
+                    )
                 }
             }
         }
@@ -190,6 +253,9 @@ final class ManualShardRunner: @unchecked Sendable {
         let sorted = results.sorted { $0.report.shardID < $1.report.shardID }
         let reports = sorted.map(\.report)
         let resultClass = planner.aggregateResultClass(sorted.map(\.outcome.resultClass))
+        if resultClass != .canceled {
+            try? context.store.updateJob(id: context.jobID, patch: JobStatePatch(cancelRequested: false))
+        }
         let counts = resultReporter.aggregateCounts(sorted.compactMap(\.parsedSummary))
         try environment.fileSystem.writeData(try jsonData(reports), to: paths.shardsManifest)
         if resultClass == .success {
@@ -206,7 +272,7 @@ final class ManualShardRunner: @unchecked Sendable {
             project: profile.name,
             resultClass: resultClass,
             counts: counts,
-            durationSeconds: 0,
+            durationSeconds: environment.clock.now().timeIntervalSince1970 - manualRunStartedAt,
             cases: resultReporter.junitCasesForShardReports(reports),
             outputURL: paths.junitReport
         )
@@ -220,6 +286,34 @@ final class ManualShardRunner: @unchecked Sendable {
                 ? shardSuccessSummary(for: profile.parallel.mode, count: reports.count)
                 : nil
         )
+    }
+
+    private func terminateManualShardProcesses(_ processIDs: [Int32], context: ToolExecutionContext) {
+        terminateManualShardProcesses(processIDs, jobID: context.jobID, store: context.store)
+    }
+
+    private func terminateManualShardProcesses(_ processIDs: [Int32], jobID: String, stateRoot: String) {
+        guard let store = try? StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: URL(fileURLWithPath: stateRoot)))) else {
+            signalManualShardProcesses(Set(processIDs))
+            return
+        }
+        terminateManualShardProcesses(processIDs, jobID: jobID, store: store)
+    }
+
+    private func terminateManualShardProcesses(_ processIDs: [Int32], jobID: String, store: StateStore) {
+        try? store.requestCancel(jobID: jobID)
+        var processIDs = Set(processIDs)
+        if let activeProcessID = try? store.fetchJob(id: jobID)?.processID {
+            processIDs.insert(activeProcessID)
+        }
+        signalManualShardProcesses(processIDs)
+    }
+
+    private func signalManualShardProcesses(_ processIDs: Set<Int32>) {
+        for pid in processIDs where pid > 0 {
+            _ = kill(-pid, SIGTERM)
+            _ = kill(pid, SIGTERM)
+        }
     }
 
     private func mergeShardResultBundles(_ reports: [ShardReport], paths: ExecutionPaths, context: ToolExecutionContext) throws {
@@ -257,7 +351,8 @@ final class ManualShardRunner: @unchecked Sendable {
         totalShards: Int,
         shardPaths: ShardPaths,
         combinedLog: URL,
-        context: ToolExecutionContext
+        context: ToolExecutionContext,
+        state: ManualShardRunState
     ) throws -> ManualShardExecutionResult {
         try environment.fileSystem.createDirectory(shardPaths.root)
         if environment.fileSystem.fileExists(shardPaths.resultBundle) {
@@ -266,6 +361,7 @@ final class ManualShardRunner: @unchecked Sendable {
         var attempts = 1
         var retryReason: String?
         var simulatorDiagnostics: [String] = []
+        var attemptArtifacts: [AttemptArtifact] = []
         var run = try runManualShardAttempt(
             testReference: testReference,
             simulatorID: simulatorID,
@@ -277,11 +373,25 @@ final class ManualShardRunner: @unchecked Sendable {
             totalShards: totalShards,
             shardPaths: shardPaths,
             combinedLog: combinedLog,
-            context: context
+            context: context,
+            state: state
         )
         var outcome = runtime.classify(run: run, resultBundle: shardPaths.resultBundle)
         if shouldRetryManualShardFailure(outcome: outcome, run: run) {
             retryReason = outcome.resultClass.rawValue
+            let preservedAttempt = try preserveAttemptArtifacts(
+                fileSystem: environment.fileSystem,
+                sourceResultBundle: shardPaths.resultBundle,
+                sourceResultStream: shardPaths.resultStream,
+                attemptPaths: shardPaths.attemptPaths(attempt: attempts),
+                attempt: attempts,
+                phase: "manual-shard",
+                resultClass: outcome.resultClass,
+                exitCode: run.exitCode,
+                timedOut: run.timedOut,
+                retryReason: retryReason
+            )
+            attemptArtifacts.append(preservedAttempt)
             if let diagnostic = runtime.captureSimulatorDiagnostics(
                 simulatorID: simulatorID,
                 outputURL: shardPaths.simulatorDiagnostics(attempt: attempts),
@@ -316,7 +426,8 @@ final class ManualShardRunner: @unchecked Sendable {
                 totalShards: totalShards,
                 shardPaths: shardPaths,
                 combinedLog: combinedLog,
-                context: context
+                context: context,
+                state: state
             )
             outcome = runtime.classify(run: run, resultBundle: shardPaths.resultBundle)
             if outcome.resultClass.isInfrastructureFailure,
@@ -327,6 +438,21 @@ final class ManualShardRunner: @unchecked Sendable {
                ) {
                 simulatorDiagnostics.append(diagnostic)
             }
+        }
+        if outcome.resultClass.isManualShardFatal {
+            let fatalProcessIDs = state.requestStopForFatalResultClass(outcome.resultClass)
+            try? runtime.warnAndLog(
+                message: "Stopping manual shard peers after \(shardPaths.id) produced \(outcome.resultClass.rawValue)",
+                logURL: shardPaths.testLog,
+                combinedLog: combinedLog
+            )
+            try? context.store.recordInfrastructureEvent(
+                jobID: context.jobID,
+                simulatorID: simulatorID,
+                resultClass: outcome.resultClass,
+                message: "Stopping manual shard peers after \(shardPaths.id) produced \(outcome.resultClass.rawValue)"
+            )
+            self.terminateManualShardProcesses(fatalProcessIDs, context: context)
         }
         let parsedSummary = resultReporter.parseXCResultSummary(at: shardPaths.resultBundle)
         let timingSamples = resultReporter.parseXCResultTestTimings(at: shardPaths.resultBundle)
@@ -346,7 +472,8 @@ final class ManualShardRunner: @unchecked Sendable {
                 counts: resultReporter.counts(from: parsedSummary),
                 attempts: attempts,
                 retryReason: retryReason,
-                simulatorDiagnostics: simulatorDiagnostics
+                simulatorDiagnostics: simulatorDiagnostics,
+                attemptArtifacts: attemptArtifacts
             ),
             outcome: outcome,
             parsedSummary: parsedSummary
@@ -364,7 +491,8 @@ final class ManualShardRunner: @unchecked Sendable {
         totalShards: Int,
         shardPaths: ShardPaths,
         combinedLog: URL,
-        context: ToolExecutionContext
+        context: ToolExecutionContext,
+        state: ManualShardRunState
     ) throws -> ToolResult {
         try runtime.prepareSimulatorPrivacy(
             simulatorID: simulatorID,
@@ -383,6 +511,12 @@ final class ManualShardRunner: @unchecked Sendable {
             onlyTestConfigurations: onlyTestConfigurations,
             skipTestConfigurations: skipTestConfigurations
         )
+        var activePID: Int32?
+        defer {
+            if let activePID {
+                state.clearActiveProcess(activePID)
+            }
+        }
         return try runtime.runAndLog(
             tool: "xcodebuild",
             arguments: arguments,
@@ -397,7 +531,13 @@ final class ManualShardRunner: @unchecked Sendable {
                 shardID: shardPaths.id,
                 shardIndex: shardIndex,
                 totalShards: totalShards
-            )
+            ),
+            processStarted: { pid in
+                activePID = pid
+                if state.recordActiveProcess(pid) {
+                    self.signalManualShardProcesses([pid])
+                }
+            }
         )
     }
 

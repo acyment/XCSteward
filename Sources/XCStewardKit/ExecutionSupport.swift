@@ -11,6 +11,37 @@ struct TestOutcome: Sendable {
     var exitCode: Int32?
 }
 
+struct AttemptArtifact: Codable, Sendable {
+    var attempt: Int
+    var phase: String
+    var resultClass: ResultClass
+    var exitCode: Int32?
+    var timedOut: Bool
+    var retryReason: String?
+    var resultBundle: String?
+    var resultStream: String?
+    var metadata: String
+
+    enum CodingKeys: String, CodingKey {
+        case attempt
+        case phase
+        case resultClass = "result_class"
+        case exitCode = "exit_code"
+        case timedOut = "timed_out"
+        case retryReason = "retry_reason"
+        case resultBundle = "result_bundle"
+        case resultStream = "result_stream"
+        case metadata
+    }
+}
+
+struct AttemptArtifactPaths: Sendable {
+    var root: URL
+    var resultBundle: URL
+    var resultStream: URL
+    var metadata: URL
+}
+
 struct ShardReport: Codable, Sendable {
     var shardID: String
     var simulatorID: String
@@ -24,6 +55,7 @@ struct ShardReport: Codable, Sendable {
     var attempts: Int
     var retryReason: String?
     var simulatorDiagnostics: [String]
+    var attemptArtifacts: [AttemptArtifact] = []
 
     enum CodingKeys: String, CodingKey {
         case shardID = "shard_id"
@@ -38,6 +70,7 @@ struct ShardReport: Codable, Sendable {
         case attempts
         case retryReason = "retry_reason"
         case simulatorDiagnostics = "simulator_diagnostics"
+        case attemptArtifacts = "attempt_artifacts"
     }
 }
 
@@ -51,6 +84,17 @@ struct ShardPaths: Sendable {
 
     func simulatorDiagnostics(attempt: Int) -> URL {
         root.appendingPathComponent("simctl-diagnose-attempt-\(attempt).log")
+    }
+
+    func attemptPaths(attempt: Int) -> AttemptArtifactPaths {
+        let root = self.root.appendingPathComponent("attempts")
+            .appendingPathComponent(String(format: "attempt-%03d", attempt))
+        return AttemptArtifactPaths(
+            root: root,
+            resultBundle: root.appendingPathComponent("result.xcresult"),
+            resultStream: root.appendingPathComponent("result-stream.json"),
+            metadata: root.appendingPathComponent("attempt-metadata.json")
+        )
     }
 }
 
@@ -81,6 +125,7 @@ struct ExecutionPaths {
     let jobRoot: URL
     let logsRoot: URL
     let artifactsRoot: URL
+    let attemptsRoot: URL
     let shardsRoot: URL
     let temporaryRoot: URL
     let derivedData: URL
@@ -104,6 +149,7 @@ struct ExecutionPaths {
         self.jobRoot = URL(fileURLWithPath: job.jobDirectory)
         self.logsRoot = jobRoot.appendingPathComponent("logs")
         self.artifactsRoot = jobRoot.appendingPathComponent("artifacts")
+        self.attemptsRoot = artifactsRoot.appendingPathComponent("attempts")
         self.shardsRoot = artifactsRoot.appendingPathComponent("shards")
         self.temporaryRoot = jobRoot.appendingPathComponent("tmp")
         self.derivedData = jobRoot.appendingPathComponent("derived-data")
@@ -144,6 +190,16 @@ struct ExecutionPaths {
         )
     }
 
+    func testAttemptPaths(attempt: Int) -> AttemptArtifactPaths {
+        let root = attemptsRoot.appendingPathComponent(String(format: "test-attempt-%03d", attempt))
+        return AttemptArtifactPaths(
+            root: root,
+            resultBundle: root.appendingPathComponent("result.xcresult"),
+            resultStream: root.appendingPathComponent("result-stream.json"),
+            metadata: root.appendingPathComponent("attempt-metadata.json")
+        )
+    }
+
     func artifacts(fileSystem: FileSystem) -> JobArtifacts {
         JobArtifacts(
             xcresult: fileSystem.fileExists(resultBundle) ? resultBundle.path : nil,
@@ -181,4 +237,49 @@ struct ExecutionPaths {
             junit: fileSystem.fileExists(junitReport) ? junitReport.path : nil
         )
     }
+}
+
+@discardableResult
+func preserveAttemptArtifacts(
+    fileSystem: FileSystem,
+    sourceResultBundle: URL,
+    sourceResultStream: URL,
+    attemptPaths: AttemptArtifactPaths,
+    attempt: Int,
+    phase: String,
+    resultClass: ResultClass,
+    exitCode: Int32?,
+    timedOut: Bool,
+    retryReason: String?
+) throws -> AttemptArtifact {
+    try fileSystem.createDirectory(attemptPaths.root)
+    let resultBundlePath: String?
+    if fileSystem.fileExists(sourceResultBundle) {
+        try fileSystem.moveItem(sourceResultBundle, to: attemptPaths.resultBundle)
+        resultBundlePath = attemptPaths.resultBundle.path
+    } else {
+        resultBundlePath = nil
+    }
+
+    let resultStreamPath: String?
+    if fileSystem.fileExists(sourceResultStream) {
+        try fileSystem.moveItem(sourceResultStream, to: attemptPaths.resultStream)
+        resultStreamPath = attemptPaths.resultStream.path
+    } else {
+        resultStreamPath = nil
+    }
+
+    let artifact = AttemptArtifact(
+        attempt: attempt,
+        phase: phase,
+        resultClass: resultClass,
+        exitCode: exitCode,
+        timedOut: timedOut,
+        retryReason: retryReason,
+        resultBundle: resultBundlePath,
+        resultStream: resultStreamPath,
+        metadata: attemptPaths.metadata.path
+    )
+    try fileSystem.writeData(try jsonData(artifact), to: attemptPaths.metadata)
+    return artifact
 }

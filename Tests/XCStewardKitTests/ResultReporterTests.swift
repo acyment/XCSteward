@@ -124,6 +124,93 @@ final class ResultReporterTests: XCTestCase {
         XCTAssertEqual(requestMetadata["test_plan"] as? String, "Smoke")
     }
 
+    func testWritesRunMetadataWithProbeWarnings() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let request = reporterRequest()
+        let job = reporterJob(request: request, directory: temp.appendingPathComponent("job"))
+        let paths = ExecutionPaths(job: job)
+        try paths.createDirectories(using: LocalFileSystem())
+        let resultBundle = paths.resultBundle
+        try FileManager.default.createDirectory(at: resultBundle, withIntermediateDirectories: true)
+        let profile = reporterProfile(repoRoot: temp.appendingPathComponent("repo").path)
+        let summary = JobSummary(
+            jobID: job.id,
+            project: job.project,
+            state: .failed,
+            resultClass: .artifactFailure,
+            exitCode: 65,
+            submittedAt: 1,
+            startedAt: 2,
+            finishedAt: 5,
+            durationSeconds: 3,
+            testPlan: nil,
+            onlyTesting: [],
+            simulatorID: "SIM-123",
+            counts: nil,
+            artifacts: paths.artifacts(fileSystem: LocalFileSystem()),
+            summaryLine: "Artifacts missing",
+            metadata: [:]
+        )
+        var healthyXcodeProbes = false
+        let runner = StubToolRunner { _, arguments in
+            if arguments.contains("summary") {
+                return ToolResult(exitCode: 0, output: "not json", timedOut: false)
+            }
+            if arguments.contains("tests") {
+                return ToolResult(exitCode: 9, output: "test timing probe failed", timedOut: false)
+            }
+            if arguments == ["-help"] {
+                if healthyXcodeProbes {
+                    return ToolResult(exitCode: 0, output: "xcodebuild help text", timedOut: false)
+                }
+                return ToolResult(exitCode: 72, output: "help unavailable", timedOut: false)
+            }
+            if arguments == ["-version"] {
+                if healthyXcodeProbes {
+                    return ToolResult(exitCode: 0, output: "Xcode 16.4\nBuild version 16F6\n", timedOut: false)
+                }
+                return ToolResult(exitCode: 0, output: "not xcode", timedOut: false)
+            }
+            return ToolResult(exitCode: 1, output: "", timedOut: false)
+        }
+        let reporter = ResultReporter(environment: AppEnvironment(
+            paths: AppPaths(stateRoot: stateRoot),
+            toolRunner: runner
+        ))
+
+        XCTAssertNil(reporter.parseXCResultSummary(at: resultBundle))
+        XCTAssertTrue(reporter.parseXCResultTestTimings(at: resultBundle).isEmpty)
+        try reporter.writeRunMetadata(summary: summary, profile: profile, request: request, paths: paths)
+
+        let metadata = try XCTUnwrap(parseJSON(String(contentsOf: paths.runMetadata)) as? [String: Any])
+        let warnings = try XCTUnwrap(metadata["probe_warnings"] as? [[String: Any]])
+        XCTAssertEqual(Set(warnings.compactMap { $0["source"] as? String }), [
+            "xcresulttool.summary",
+            "xcresulttool.tests",
+            "xcodebuild.help",
+            "xcodebuild.version",
+        ])
+        let helpWarning = try XCTUnwrap(warnings.first { ($0["source"] as? String) == "xcodebuild.help" })
+        XCTAssertEqual((helpWarning["exit_code"] as? NSNumber)?.intValue, 72)
+        XCTAssertEqual(helpWarning["output_excerpt"] as? String, "help unavailable")
+        let summaryWarning = try XCTUnwrap(warnings.first { ($0["source"] as? String) == "xcresulttool.summary" })
+        XCTAssertTrue((summaryWarning["message"] as? String)?.contains("unparseable") == true)
+
+        healthyXcodeProbes = true
+        let secondJob = reporterJob(request: request, directory: temp.appendingPathComponent("job-2"))
+        let secondPaths = ExecutionPaths(job: secondJob)
+        try secondPaths.createDirectories(using: LocalFileSystem())
+        var secondSummary = summary
+        secondSummary.jobID = secondJob.id
+        secondSummary.artifacts = secondPaths.artifacts(fileSystem: LocalFileSystem())
+
+        try reporter.writeRunMetadata(summary: secondSummary, profile: profile, request: request, paths: secondPaths)
+
+        let secondMetadata = try XCTUnwrap(parseJSON(String(contentsOf: secondPaths.runMetadata)) as? [String: Any])
+        XCTAssertEqual((secondMetadata["probe_warnings"] as? [[String: Any]])?.count, 0)
+    }
+
     func testWritesManualShardDiagnostics() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")

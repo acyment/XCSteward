@@ -60,6 +60,34 @@ final class ManualShardPlanningTests: XCTestCase {
         ])
     }
 
+    func testParsesQualifiedEnumerationNamesAndStringListsConservatively() throws {
+        let data = Data(
+            """
+            {
+              "metadata": {"name": "DemoApp"},
+              "tests": [
+                {"name": "DemoTests/BazTests/testC"},
+                {"name": "Human readable suite"},
+                {"testNames": [
+                  " DemoTests/QuxTests/testD ",
+                  "not a test identifier"
+                ]},
+                "DemoTests/ListTests/testE",
+                "display text"
+              ]
+            }
+            """.utf8
+        )
+
+        let identifiers = try ManualShardPlanner().parseEnumeratedTestIdentifiers(from: data)
+
+        XCTAssertEqual(identifiers, [
+            "DemoTests/BazTests/testC",
+            "DemoTests/QuxTests/testD",
+            "DemoTests/ListTests/testE",
+        ])
+    }
+
     func testFiltersEnumeratedIdentifiersWithSkipFilters() {
         let identifiers = ManualShardPlanner().filterEnumeratedTestIdentifiers(
             [

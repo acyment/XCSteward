@@ -8,6 +8,7 @@ final class ManualShardRunnerServiceBoundaryTests: XCTestCase {
         let stateRoot = temp.appendingPathComponent("state")
         let environment = AppEnvironment(
             paths: AppPaths(stateRoot: stateRoot),
+            clock: StickyManualShardClock(start: 100, later: 105),
             toolRunner: ManualShardXCResultToolRunner()
         )
         let store = try StateStore(environment: environment)
@@ -57,6 +58,31 @@ final class ManualShardRunnerServiceBoundaryTests: XCTestCase {
         XCTAssertTrue(runtime.runAndLogArguments.contains { $0.contains("-only-testing:DemoTests/FooTests/testA") })
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.shardsManifest.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.combinedSummary.path))
+        let junit = try String(contentsOf: paths.junitReport)
+        let suiteLine = try XCTUnwrap(junit.split(separator: "\n").first { $0.contains("<testsuite") })
+        XCTAssertTrue(suiteLine.contains("time=\"5.000\""))
+    }
+}
+
+private final class StickyManualShardClock: Clock {
+    private let lock = NSLock()
+    private let start: TimeInterval
+    private let later: TimeInterval
+    private var hasReturnedStart = false
+
+    init(start: TimeInterval, later: TimeInterval) {
+        self.start = start
+        self.later = later
+    }
+
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        if hasReturnedStart {
+            return Date(timeIntervalSince1970: later)
+        }
+        hasReturnedStart = true
+        return Date(timeIntervalSince1970: start)
     }
 }
 
@@ -129,6 +155,29 @@ private final class FakeManualShardRuntime: ManualShardRuntime {
         context: ToolExecutionContext,
         environmentOverrides: [String: String]
     ) throws -> ToolResult {
+        try runAndLog(
+            tool: tool,
+            arguments: arguments,
+            timeout: timeout,
+            logURL: logURL,
+            combinedLog: combinedLog,
+            context: context,
+            environmentOverrides: environmentOverrides,
+            processStarted: nil
+        )
+    }
+
+    func runAndLog(
+        tool: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        logURL: URL,
+        combinedLog: URL,
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String],
+        processStarted: ((Int32) throws -> Void)?
+    ) throws -> ToolResult {
+        try processStarted?(Int32(runAndLogArguments.count + 1))
         runAndLogArguments.append(arguments.joined(separator: " "))
         if let resultBundlePath = argument(after: "-resultBundlePath", in: arguments) {
             try fileSystem.createDirectory(URL(fileURLWithPath: resultBundlePath))

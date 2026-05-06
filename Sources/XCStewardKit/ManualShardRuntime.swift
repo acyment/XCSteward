@@ -25,6 +25,16 @@ protocol ManualShardRuntime: AnyObject {
         context: ToolExecutionContext,
         environmentOverrides: [String: String]
     ) throws -> ToolResult
+    func runAndLog(
+        tool: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        logURL: URL,
+        combinedLog: URL,
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String],
+        processStarted: ((Int32) throws -> Void)?
+    ) throws -> ToolResult
     func throwIfCanceled(_ result: ToolResult, context: ToolExecutionContext) throws
     func isCancellationResult(_ result: ToolResult) -> Bool
     func commandFailed(_ message: String, output: String) -> XCStewardError

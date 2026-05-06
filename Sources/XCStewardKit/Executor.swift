@@ -246,6 +246,19 @@ final class JobExecutor: @unchecked Sendable {
             return TestOutcome(resultClass: .canceled, exitCode: run.exitCode)
         }
         if shouldRetryBootstrapFailure(run: run) {
+            let firstOutcome = classify(run: run, resultBundle: paths.resultBundle)
+            try preserveAttemptArtifacts(
+                fileSystem: environment.fileSystem,
+                sourceResultBundle: paths.resultBundle,
+                sourceResultStream: paths.resultStream,
+                attemptPaths: paths.testAttemptPaths(attempt: 1),
+                attempt: 1,
+                phase: "test",
+                resultClass: firstOutcome.resultClass,
+                exitCode: run.exitCode,
+                timedOut: run.timedOut,
+                retryReason: firstOutcome.resultClass.rawValue
+            )
             try? context.store.recordInfrastructureEvent(
                 jobID: context.jobID,
                 simulatorID: simulatorID,
@@ -473,12 +486,35 @@ final class JobExecutor: @unchecked Sendable {
         context: ToolExecutionContext,
         environmentOverrides: [String: String] = [:]
     ) throws -> ToolResult {
+        try runAndLog(
+            tool: tool,
+            arguments: arguments,
+            timeout: timeout,
+            logURL: logURL,
+            combinedLog: combinedLog,
+            context: context,
+            environmentOverrides: environmentOverrides,
+            processStarted: nil
+        )
+    }
+
+    func runAndLog(
+        tool: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        logURL: URL,
+        combinedLog: URL,
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String],
+        processStarted: ((Int32) throws -> Void)?
+    ) throws -> ToolResult {
         let result = try runTool(
             tool: tool,
             arguments: arguments,
             timeout: timeout,
             context: context,
-            environmentOverrides: environmentOverrides
+            environmentOverrides: environmentOverrides,
+            processStarted: processStarted
         )
         try environment.fileSystem.appendData(Data(result.output.utf8), to: logURL)
         try environment.fileSystem.appendData(Data(result.output.utf8), to: combinedLog)
@@ -492,11 +528,34 @@ final class JobExecutor: @unchecked Sendable {
         context: ToolExecutionContext,
         environmentOverrides: [String: String] = [:]
     ) throws -> ToolResult {
+        try runTool(
+            tool: tool,
+            arguments: arguments,
+            timeout: timeout,
+            context: context,
+            environmentOverrides: environmentOverrides,
+            processStarted: nil
+        )
+    }
+
+    func runTool(
+        tool: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        context: ToolExecutionContext,
+        environmentOverrides: [String: String],
+        processStarted: ((Int32) throws -> Void)?
+    ) throws -> ToolResult {
         if let tmpdir = environmentOverrides["TMPDIR"], !tmpdir.isEmpty {
             try? environment.fileSystem.createDirectory(URL(fileURLWithPath: tmpdir))
         }
+        var activePID: Int32?
         defer {
-            try? context.store.clearJobProcessID(id: context.jobID)
+            if let activePID {
+                try? context.store.clearJobProcessID(id: context.jobID, processID: activePID)
+            } else {
+                try? context.store.clearJobProcessID(id: context.jobID)
+            }
         }
         let toolEnvironment = context.profile.env.merging(environmentOverrides) { _, override in override }
         return try environment.toolRunner.run(
@@ -506,7 +565,12 @@ final class JobExecutor: @unchecked Sendable {
             workingDirectory: context.profile.workingDirectory,
             timeout: timeout,
             processStarted: { pid in
+                activePID = pid
+                try processStarted?(pid)
                 try context.store.updateJob(id: context.jobID, patch: JobStatePatch(state: .running, processID: pid))
+            },
+            shouldTerminate: {
+                try context.store.fetchJob(id: context.jobID)?.cancelRequested == true
             }
         )
     }

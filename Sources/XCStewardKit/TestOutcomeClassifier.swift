@@ -34,11 +34,17 @@ struct TestOutcomeClassifier {
     }
 
     private func isRunnerBootstrapFailure(run: ToolResult) -> Bool {
-        bootstrapFailurePatterns.contains { run.output.contains($0) }
+        output(run.output, containsAny: bootstrapFailurePatterns)
     }
 
     private func isRunnerConfigurationFailure(run: ToolResult) -> Bool {
-        configurationFailurePatterns.contains { run.output.contains($0) }
+        output(run.output, containsAny: configurationFailurePatterns)
+    }
+
+    private func output(_ output: String, containsAny patterns: [String]) -> Bool {
+        patterns.contains { pattern in
+            output.range(of: pattern, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
     }
 
     private var bootstrapFailurePatterns: [String] {

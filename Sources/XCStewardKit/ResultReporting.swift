@@ -56,6 +56,43 @@ struct JUnitTestCase: Sendable {
     var skipped: Bool
 }
 
+struct ProbeWarning: Codable, Sendable {
+    var source: String
+    var command: String
+    var message: String
+    var exitCode: Int32?
+    var timedOut: Bool?
+    var outputExcerpt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case command
+        case message
+        case exitCode = "exit_code"
+        case timedOut = "timed_out"
+        case outputExcerpt = "output_excerpt"
+    }
+}
+
+final class ProbeWarningRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [ProbeWarning] = []
+
+    func record(_ warning: ProbeWarning) {
+        lock.lock()
+        recorded.append(warning)
+        lock.unlock()
+    }
+
+    func drain() -> [ProbeWarning] {
+        lock.lock()
+        defer { lock.unlock() }
+        let warnings = recorded
+        recorded = []
+        return warnings
+    }
+}
+
 private struct ManualShardRunDiagnostics: Codable, Sendable {
     var jobID: String
     var project: String
@@ -103,6 +140,8 @@ private struct RunMetadata: Codable, Sendable {
     var testProductsPath: String?
     var resultStreamPath: String?
     var xcodebuildHelpPath: String?
+    var attempts: [AttemptArtifact]
+    var probeWarnings: [ProbeWarning]
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
@@ -121,6 +160,8 @@ private struct RunMetadata: Codable, Sendable {
         case testProductsPath = "test_products_path"
         case resultStreamPath = "result_stream_path"
         case xcodebuildHelpPath = "xcodebuild_help_path"
+        case attempts
+        case probeWarnings = "probe_warnings"
     }
 }
 
@@ -188,10 +229,13 @@ final class ResultReporter: @unchecked Sendable {
     private let environment: AppEnvironment
     private let junitWriter = JUnitReportWriter()
     private let xcresultReader: XCResultReader
+    private let probeWarnings = ProbeWarningRecorder()
 
     init(environment: AppEnvironment) {
         self.environment = environment
-        self.xcresultReader = XCResultReader(environment: environment)
+        self.xcresultReader = XCResultReader(environment: environment) { [probeWarnings] warning in
+            probeWarnings.record(warning)
+        }
     }
 
     func persistSummary(_ summary: JobSummary, to url: URL) throws {
@@ -296,9 +340,12 @@ final class ResultReporter: @unchecked Sendable {
         guard let startedAt = summary.startedAt,
               let finishedAt = summary.finishedAt,
               let durationSeconds = summary.durationSeconds else {
+            _ = probeWarnings.drain()
             return
         }
         let xcodebuildHelpPath = captureXcodebuildHelp(profile: profile, paths: paths)
+        let xcodeVersion = queryXcodeVersion(profile: profile)
+        let warnings = probeWarnings.drain()
         let metadata = RunMetadata(
             jobID: summary.jobID,
             project: summary.project,
@@ -308,7 +355,7 @@ final class ResultReporter: @unchecked Sendable {
             startedAt: startedAt,
             finishedAt: finishedAt,
             durationSeconds: durationSeconds,
-            xcodeVersion: queryXcodeVersion(profile: profile),
+            xcodeVersion: xcodeVersion,
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             request: RunRequestMetadata(
                 testPlan: request.testPlan ?? profile.defaultTestPlan,
@@ -341,40 +388,141 @@ final class ResultReporter: @unchecked Sendable {
             artifacts: summary.artifacts,
             testProductsPath: environment.fileSystem.fileExists(paths.testProducts) ? paths.testProducts.path : nil,
             resultStreamPath: environment.fileSystem.fileExists(paths.resultStream) ? paths.resultStream.path : nil,
-            xcodebuildHelpPath: xcodebuildHelpPath
+            xcodebuildHelpPath: xcodebuildHelpPath,
+            attempts: attemptArtifacts(at: paths.attemptsRoot),
+            probeWarnings: warnings
         )
         try environment.fileSystem.writeData(try jsonData(metadata), to: paths.runMetadata)
     }
 
+    private func attemptArtifacts(at attemptsRoot: URL) -> [AttemptArtifact] {
+        guard let entries = try? environment.fileSystem.contentsOfDirectory(attemptsRoot) else {
+            return []
+        }
+        return entries
+            .compactMap { entry -> AttemptArtifact? in
+                let metadata = entry.appendingPathComponent("attempt-metadata.json")
+                guard let data = try? environment.fileSystem.readData(from: metadata) else {
+                    return nil
+                }
+                return try? decodeJSON(AttemptArtifact.self, from: data)
+            }
+            .sorted { $0.attempt < $1.attempt }
+    }
+
     private func captureXcodebuildHelp(profile: ProjectProfile, paths: ExecutionPaths) -> String? {
-        guard let result = try? environment.toolRunner.run(
-            tool: "xcodebuild",
-            arguments: ["-help"],
-            environment: profile.env,
-            workingDirectory: profile.workingDirectory,
-            timeout: 5
-        ), result.exitCode == 0 else {
+        let command = ["xcodebuild", "-help"]
+        let result: ToolResult
+        do {
+            result = try environment.toolRunner.run(
+                tool: "xcodebuild",
+                arguments: ["-help"],
+                environment: profile.env,
+                workingDirectory: profile.workingDirectory,
+                timeout: 5
+            )
+        } catch {
+            recordProbeWarning(
+                source: "xcodebuild.help",
+                command: command,
+                message: "xcodebuild -help probe could not run: \(error)"
+            )
+            return nil
+        }
+        guard result.exitCode == 0, !result.timedOut else {
+            recordProbeWarning(
+                source: "xcodebuild.help",
+                command: command,
+                message: result.timedOut
+                    ? "xcodebuild -help probe timed out"
+                    : "xcodebuild -help probe failed with exit code \(result.exitCode)",
+                result: result
+            )
             return nil
         }
         do {
             try environment.fileSystem.writeData(Data(result.output.utf8), to: paths.xcodebuildHelp)
             return paths.xcodebuildHelp.path
         } catch {
+            recordProbeWarning(
+                source: "xcodebuild.help",
+                command: command,
+                message: "xcodebuild -help probe output could not be written: \(error)",
+                result: result
+            )
             return nil
         }
     }
 
     private func queryXcodeVersion(profile: ProjectProfile) -> String? {
-        guard let result = try? environment.toolRunner.run(
-            tool: "xcodebuild",
-            arguments: ["-version"],
-            environment: profile.env,
-            workingDirectory: profile.workingDirectory,
-            timeout: 10
-        ), result.exitCode == 0 else {
+        let command = ["xcodebuild", "-version"]
+        let result: ToolResult
+        do {
+            result = try environment.toolRunner.run(
+                tool: "xcodebuild",
+                arguments: ["-version"],
+                environment: profile.env,
+                workingDirectory: profile.workingDirectory,
+                timeout: 10
+            )
+        } catch {
+            recordProbeWarning(
+                source: "xcodebuild.version",
+                command: command,
+                message: "xcodebuild -version probe could not run: \(error)"
+            )
             return nil
         }
-        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.exitCode == 0, !result.timedOut else {
+            recordProbeWarning(
+                source: "xcodebuild.version",
+                command: command,
+                message: result.timedOut
+                    ? "xcodebuild -version probe timed out"
+                    : "xcodebuild -version probe failed with exit code \(result.exitCode)",
+                result: result
+            )
+            return nil
+        }
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard output.contains("Xcode") else {
+            recordProbeWarning(
+                source: "xcodebuild.version",
+                command: command,
+                message: "xcodebuild -version probe produced unparseable output",
+                result: result
+            )
+            return nil
+        }
+        return output
+    }
+
+    private func recordProbeWarning(
+        source: String,
+        command: [String],
+        message: String,
+        result: ToolResult? = nil
+    ) {
+        probeWarnings.record(ProbeWarning(
+            source: source,
+            command: command.joined(separator: " "),
+            message: message,
+            exitCode: result?.exitCode,
+            timedOut: result?.timedOut,
+            outputExcerpt: result.flatMap { outputExcerpt($0.output) }
+        ))
+    }
+
+    private func outputExcerpt(_ output: String) -> String? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        if trimmed.count <= 500 {
+            return trimmed
+        }
+        let end = trimmed.index(trimmed.startIndex, offsetBy: 500)
+        return String(trimmed[..<end])
     }
 
 }

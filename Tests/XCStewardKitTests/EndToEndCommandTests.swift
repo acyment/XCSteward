@@ -1872,6 +1872,58 @@ final class EndToEndCommandTests: XCTestCase {
         XCTAssertEqual(try store.countRecentInfrastructureFailures(since: 0), 1)
     }
 
+    func testManualShardRetryPreservesFirstAttemptResultBundle() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .manualShardBootstrapRetryWithPartialResult)
+        try createProfile(
+            name: "demo",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            allowed_simulator_ids = ["SIM-123", "SIM-456"]
+            [parallel]
+            mode = "manual-shards"
+            shard_count = 2
+            """
+        )
+
+        let result = try runCLI(
+            arguments: [
+                "submit",
+                "--state-root", stateRoot.path,
+                "--project", "demo",
+                "--wait",
+                "--json",
+            ],
+            environment: fakeTools.env
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
+        XCTAssertEqual(json["result_class"] as? String, "success")
+        let artifacts = try XCTUnwrap(json["artifacts"] as? [String: Any])
+        let diagnostics = try loadManualRunDiagnostics(from: artifacts)
+        let retriedReport = try XCTUnwrap(diagnostics.shards.first { ($0["attempts"] as? Int) == 2 })
+        let attemptArtifacts = try XCTUnwrap(retriedReport["attempt_artifacts"] as? [[String: Any]])
+        XCTAssertEqual(attemptArtifacts.count, 1)
+        let attempt = try XCTUnwrap(attemptArtifacts.first)
+        XCTAssertEqual(attempt["phase"] as? String, "manual-shard")
+        XCTAssertEqual(attempt["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertEqual(attempt["retry_reason"] as? String, "runner_bootstrap_failure")
+
+        let firstAttemptBundle = try XCTUnwrap(attempt["result_bundle"] as? String)
+        let finalBundle = try XCTUnwrap(retriedReport["result_bundle"] as? String)
+        XCTAssertNotEqual(firstAttemptBundle, finalBundle)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: firstAttemptBundle).appendingPathComponent("summary.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: finalBundle).appendingPathComponent("summary.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(attempt["metadata"] as? String)))
+    }
+
     func testManualShardsUseHistoricalTimingsToBalanceFutureRuns() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -2246,7 +2298,7 @@ final class EndToEndCommandTests: XCTestCase {
 
         XCTAssertNotEqual(result.status, 0)
         let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
-        XCTAssertTrue((json["summary_line"] as? String)?.contains("coverage.enabled is required when [coverage] is present") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("coverage.enabled must be a boolean") == true)
     }
 
     func testInvalidResultStreamSettingsFailConfiguration() throws {
@@ -2280,7 +2332,7 @@ final class EndToEndCommandTests: XCTestCase {
 
         XCTAssertNotEqual(result.status, 0)
         let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
-        XCTAssertTrue((json["summary_line"] as? String)?.contains("result_stream.enabled is required when [result_stream] is present") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("result_stream.enabled must be a boolean") == true)
     }
 
     func testInvalidResultBundleVersionFailsConfiguration() throws {
@@ -2759,6 +2811,54 @@ final class EndToEndCommandTests: XCTestCase {
         XCTAssertTrue(toolLog.contains("xcrun simctl erase SIM-123"))
         XCTAssertFalse(toolLog.contains("shutdown all"))
         XCTAssertFalse(toolLog.contains("erase all"))
+    }
+
+    func testBootstrapRetryPreservesFirstAttemptResultBundle() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .bootstrapRetryWithPartialResult)
+        try createProfile(
+            name: "demo",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            """
+        )
+
+        let result = try runCLI(
+            arguments: [
+                "submit",
+                "--state-root", stateRoot.path,
+                "--project", "demo",
+                "--wait",
+                "--json",
+            ],
+            environment: fakeTools.env
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
+        XCTAssertEqual(json["result_class"] as? String, "success")
+        let jobID = try XCTUnwrap(json["job_id"] as? String)
+        let jobDir = stateRoot.appendingPathComponent("jobs/\(jobID)")
+        let finalBundle = jobDir.appendingPathComponent("artifacts/result.xcresult/summary.json")
+        let preservedBundle = jobDir.appendingPathComponent("artifacts/attempts/test-attempt-001/result.xcresult/summary.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finalBundle.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preservedBundle.path))
+
+        let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: jobDir.appendingPathComponent("artifacts/run-metadata.json"))) as? [String: Any])
+        let attempts = try XCTUnwrap(runMetadata["attempts"] as? [[String: Any]])
+        XCTAssertEqual(attempts.count, 1)
+        let attempt = try XCTUnwrap(attempts.first)
+        XCTAssertEqual(attempt["phase"] as? String, "test")
+        XCTAssertEqual(attempt["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertEqual(attempt["retry_reason"] as? String, "runner_bootstrap_failure")
+        XCTAssertEqual(attempt["result_bundle"] as? String, jobDir.appendingPathComponent("artifacts/attempts/test-attempt-001/result.xcresult").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(attempt["metadata"] as? String)))
     }
 
     func testExecutorBootsSimulatorBeforeBuildAndTest() throws {
@@ -3799,7 +3899,7 @@ final class EndToEndCommandTests: XCTestCase {
         XCTAssertTrue(bothFinished)
     }
 
-    func testWorkerLeavesQueuedJobsWhenInfrastructureDrainModeIsActive() throws {
+    func testWorkerRunsQueuedJobsAfterInfrastructureDrainWindowClears() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
         let repoRoot = temp.appendingPathComponent("repo")
@@ -3808,7 +3908,7 @@ final class EndToEndCommandTests: XCTestCase {
             extraEnv: [
                 "XCSTEWARD_MAX_CONCURRENT_JOBS": "2",
                 "XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT": "1",
-                "XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS": "600",
+                "XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS": "1",
             ]
         )
         let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
@@ -3854,6 +3954,74 @@ final class EndToEndCommandTests: XCTestCase {
             let toolLog = try String(contentsOf: fakeTools.log)
             XCTAssertFalse(toolLog.contains("build-for-testing"))
         }
+
+        let lease = try XCTUnwrap(try store.currentLease())
+        XCTAssertTrue(isPIDAlive(lease.pid))
+
+        let finishedAfterDrainClears = try waitUntil(timeout: 8) {
+            let status = try runCLI(arguments: ["status", "--state-root", stateRoot.path, jobID, "--json"], environment: fakeTools.env)
+            let json = try XCTUnwrap(parseJSON(status.stdout) as? [String: Any])
+            return (json["state"] as? String) == "succeeded"
+        }
+        XCTAssertTrue(finishedAfterDrainClears)
+        let toolLog = try String(contentsOf: fakeTools.log)
+        XCTAssertTrue(toolLog.contains("build-for-testing"))
+    }
+
+    func testSerialWorkerWaitsForTemporaryInfrastructureDrainToClear() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(
+            scenario: .success,
+            extraEnv: [
+                "XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT": "1",
+                "XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS": "1",
+            ]
+        )
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        try store.recordInfrastructureEvent(
+            jobID: "previous-job",
+            simulatorID: "SIM-123",
+            resultClass: .runnerBootstrapFailure,
+            message: "previous infra failure"
+        )
+        try createProfile(
+            name: "demo",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            """
+        )
+
+        let submit = try runCLI(
+            arguments: ["submit", "--state-root", stateRoot.path, "--project", "demo", "--json"],
+            environment: fakeTools.env
+        )
+        XCTAssertEqual(submit.status, 0, "stderr: \(submit.stderr)")
+        let submitJSON = try XCTUnwrap(parseJSON(submit.stdout) as? [String: Any])
+        let jobID = try XCTUnwrap(submitJSON["job_id"] as? String)
+
+        let queuedDuringDrain = try waitUntil(timeout: 3) {
+            let status = try runCLI(arguments: ["status", "--state-root", stateRoot.path, jobID, "--json"], environment: fakeTools.env)
+            let json = try XCTUnwrap(parseJSON(status.stdout) as? [String: Any])
+            return (json["state"] as? String) == "queued"
+        }
+        XCTAssertTrue(queuedDuringDrain)
+        let lease = try XCTUnwrap(try store.currentLease())
+        XCTAssertTrue(isPIDAlive(lease.pid))
+
+        let finishedAfterDrainClears = try waitUntil(timeout: 8) {
+            let status = try runCLI(arguments: ["status", "--state-root", stateRoot.path, jobID, "--json"], environment: fakeTools.env)
+            let json = try XCTUnwrap(parseJSON(status.stdout) as? [String: Any])
+            return (json["state"] as? String) == "succeeded"
+        }
+        XCTAssertTrue(finishedAfterDrainClears)
+        let toolLog = try String(contentsOf: fakeTools.log)
+        XCTAssertTrue(toolLog.contains("build-for-testing"))
     }
 
     func testRunningJobCancellationTerminatesActiveXcodebuildAndRecordsCanceledSummary() throws {
