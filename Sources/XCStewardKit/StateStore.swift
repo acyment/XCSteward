@@ -100,6 +100,10 @@ public final class StateStore {
         try jobs.claimNextQueued()
     }
 
+    public func hasQueuedJobs() throws -> Bool {
+        try jobs.hasQueued()
+    }
+
     public func updateJob(id: String, patch: JobStatePatch) throws {
         try jobs.update(id: id, patch: patch)
     }
@@ -109,7 +113,15 @@ public final class StateStore {
     }
 
     public func clearJobProcessID(id: String) throws {
-        try jobs.clearProcessID(id: id)
+        try jobs.clearProcessID(id: id, processID: nil)
+    }
+
+    public func clearJobProcessID(id: String, processID: Int32) throws {
+        try jobs.clearProcessID(id: id, processID: processID)
+    }
+
+    public func deleteTerminalJob(id: String) throws {
+        try jobs.deleteTerminal(id: id)
     }
 
     public func acquireLease(workerID: String, pid: Int32) throws -> Bool {
@@ -194,6 +206,27 @@ public final class StateStore {
         guard step == SQLITE_DONE || step == SQLITE_ROW else {
             throw XCStewardError.commandFailed("Failed to execute SQL: \(sql)")
         }
+    }
+
+    fileprivate func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let value = try body()
+            do {
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
+            }
+            return value
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    fileprivate func changedRowCount() -> Int {
+        Int(sqlite3_changes(db))
     }
 
     fileprivate func query<T>(_ sql: String, values: [SQLiteValue], map: (OpaquePointer?) throws -> T) throws -> [T] {
@@ -351,11 +384,30 @@ struct JobRecordGateway {
     }
 
     func claimNextQueued() throws -> JobRecord? {
-        guard let job = try nextQueued() else {
-            return nil
+        try store.withImmediateTransaction {
+            guard let job = try nextQueued() else {
+                return nil
+            }
+            try store.execute(
+                "UPDATE jobs SET state = ? WHERE id = ? AND state = ?;",
+                values: [
+                    .text(JobState.running.rawValue),
+                    .text(job.id),
+                    .text(JobState.queued.rawValue),
+                ]
+            )
+            guard store.changedRowCount() == 1 else {
+                return nil
+            }
+            return try fetch(id: job.id)
         }
-        try update(id: job.id, patch: JobStatePatch(state: .running))
-        return try fetch(id: job.id) ?? job
+    }
+
+    func hasQueued() throws -> Bool {
+        try store.querySingle(
+            "SELECT 1 FROM jobs WHERE state = ? LIMIT 1;",
+            values: [.text(JobState.queued.rawValue)]
+        ) { _ in true } ?? false
     }
 
     func update(id: String, patch: JobStatePatch) throws {
@@ -391,8 +443,30 @@ struct JobRecordGateway {
         try store.execute("UPDATE jobs SET cancel_requested = 1 WHERE id = ?;", values: [.text(jobID)])
     }
 
-    func clearProcessID(id: String) throws {
-        try store.execute("UPDATE jobs SET process_id = NULL WHERE id = ?;", values: [.text(id)])
+    func clearProcessID(id: String, processID: Int32?) throws {
+        if let processID {
+            try store.execute(
+                "UPDATE jobs SET process_id = NULL WHERE id = ? AND process_id = ?;",
+                values: [.text(id), .int(Int64(processID))]
+            )
+        } else {
+            try store.execute("UPDATE jobs SET process_id = NULL WHERE id = ?;", values: [.text(id)])
+        }
+    }
+
+    func deleteTerminal(id: String) throws {
+        try store.execute(
+            """
+            DELETE FROM jobs
+            WHERE id = ?
+              AND state NOT IN (?, ?);
+            """,
+            values: [
+                .text(id),
+                .text(JobState.queued.rawValue),
+                .text(JobState.running.rawValue),
+            ]
+        )
     }
 
     func markRunningJobsInterrupted(finishedAt: Double) throws {

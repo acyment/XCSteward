@@ -9,6 +9,7 @@ final class Worker: @unchecked Sendable {
     private let hostCapacity: HostCapacityController
     private let workerID: String
     private let maxConcurrentJobs: Int
+    private let capacityRetryInterval: TimeInterval = 0.25
 
     init(environment: AppEnvironment, store: StateStore) {
         self.environment = environment
@@ -35,14 +36,19 @@ final class Worker: @unchecked Sendable {
     }
 
     private func runSerial() throws {
-        guard try hostCapacity.effectiveMaxConcurrentJobs(configuredMax: maxConcurrentJobs) > 0 else {
-            return
-        }
-        while let job = try store.claimNextQueuedJob() {
-            try process(job: job, store: store, profileLoader: profileLoader, executor: executor)
+        while true {
             guard try hostCapacity.effectiveMaxConcurrentJobs(configuredMax: maxConcurrentJobs) > 0 else {
+                guard try store.hasQueuedJobs() else {
+                    return
+                }
+                try store.updateLeaseHeartbeat(jobID: nil)
+                Thread.sleep(forTimeInterval: capacityRetryInterval)
+                continue
+            }
+            guard let job = try store.claimNextQueuedJob() else {
                 return
             }
+            try process(job: job, store: store, profileLoader: profileLoader, executor: executor)
         }
     }
 
@@ -81,11 +87,12 @@ final class Worker: @unchecked Sendable {
                 }
                 dispatch(job)
             }
-            if jobState.activeCount == 0 {
+            let hasQueuedJobs = try store.hasQueuedJobs()
+            if jobState.activeCount == 0, !hasQueuedJobs {
                 break
             }
             try store.updateLeaseHeartbeat(jobID: nil)
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: jobState.activeCount == 0 ? capacityRetryInterval : 0.1)
         }
         group.wait()
         if let firstError = jobState.firstError {

@@ -32,6 +32,38 @@ final class StateStoreGatewayTests: XCTestCase {
         XCTAssertEqual(fetched.simulatorID, "SIM-123")
     }
 
+    func testConcurrentClaimersOnlyClaimSingleQueuedJobOnce() throws {
+        let stateRoot = try makeTempDirectory().appendingPathComponent("state")
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        try store.jobs.create(gatewayJob(id: "job-1", state: .queued))
+
+        let claimed = try claimJobsConcurrently(stateRoot: stateRoot, claimantCount: 16)
+
+        XCTAssertEqual(claimed, ["job-1"])
+        let fetched = try XCTUnwrap(store.jobs.fetch(id: "job-1"))
+        XCTAssertEqual(fetched.state, .running)
+        XCTAssertFalse(try store.hasQueuedJobs())
+    }
+
+    func testConcurrentClaimersClaimMultipleQueuedJobsWithoutDuplicates() throws {
+        let stateRoot = try makeTempDirectory().appendingPathComponent("state")
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        let jobIDs = (1...5).map { "job-\($0)" }
+        for jobID in jobIDs {
+            try store.jobs.create(gatewayJob(id: jobID, state: .queued))
+        }
+
+        let claimed = try claimJobsConcurrently(stateRoot: stateRoot, claimantCount: 16)
+
+        XCTAssertEqual(Set(claimed), Set(jobIDs))
+        XCTAssertEqual(claimed.count, jobIDs.count)
+        for jobID in jobIDs {
+            let fetched = try XCTUnwrap(store.jobs.fetch(id: jobID))
+            XCTAssertEqual(fetched.state, .running)
+        }
+        XCTAssertFalse(try store.hasQueuedJobs())
+    }
+
     func testWorkerLeaseGatewayRecoversStaleLeaseAndMarksRunningJobsInterrupted() throws {
         let store = try gatewayStore()
         try store.jobs.create(gatewayJob(id: "running-job", state: .running))
@@ -108,6 +140,65 @@ final class StateStoreGatewayTests: XCTestCase {
 private func gatewayStore() throws -> StateStore {
     let temp = try makeTempDirectory()
     return try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: temp.appendingPathComponent("state"))))
+}
+
+private func claimJobsConcurrently(stateRoot: URL, claimantCount: Int) throws -> [String] {
+    let queue = DispatchQueue(label: "XCStewardTests.StateStore.claimers", attributes: .concurrent)
+    let group = DispatchGroup()
+    let results = ConcurrentClaimResults()
+
+    for _ in 0..<claimantCount {
+        group.enter()
+        queue.async {
+            defer { group.leave() }
+            do {
+                let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+                if let job = try store.claimNextQueuedJob() {
+                    results.append(job.id)
+                }
+            } catch {
+                results.record(error)
+            }
+        }
+    }
+
+    group.wait()
+    if let firstError = results.firstError {
+        throw firstError
+    }
+    return results.claimed.sorted()
+}
+
+private final class ConcurrentClaimResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimedIDs: [String] = []
+    private var storedError: Error?
+
+    var claimed: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return claimedIDs
+    }
+
+    var firstError: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedError
+    }
+
+    func append(_ jobID: String) {
+        lock.lock()
+        claimedIDs.append(jobID)
+        lock.unlock()
+    }
+
+    func record(_ error: Error) {
+        lock.lock()
+        if storedError == nil {
+            storedError = error
+        }
+        lock.unlock()
+    }
 }
 
 private func gatewayJob(

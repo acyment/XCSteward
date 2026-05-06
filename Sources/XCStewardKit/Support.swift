@@ -54,6 +54,7 @@ public protocol FileSystem {
     func readData(from url: URL) throws -> Data
     func fileExists(_ url: URL) -> Bool
     func removeItem(_ url: URL) throws
+    func moveItem(_ source: URL, to destination: URL) throws
     func contentsOfDirectory(_ url: URL) throws -> [URL]
 }
 
@@ -88,6 +89,13 @@ public struct LocalFileSystem: FileSystem {
             try manager.removeItem(at: url)
         }
     }
+    public func moveItem(_ source: URL, to destination: URL) throws {
+        try createDirectory(destination.deletingLastPathComponent())
+        if manager.fileExists(atPath: destination.path) {
+            try manager.removeItem(at: destination)
+        }
+        try manager.moveItem(at: source, to: destination)
+    }
     public func contentsOfDirectory(_ url: URL) throws -> [URL] {
         try manager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
     }
@@ -102,6 +110,17 @@ public protocol ToolRunning {
         workingDirectory: URL?,
         timeout: TimeInterval?,
         processStarted: ((Int32) throws -> Void)?
+    ) throws -> ToolResult
+
+    @discardableResult
+    func run(
+        tool: String,
+        arguments: [String],
+        environment: [String: String],
+        workingDirectory: URL?,
+        timeout: TimeInterval?,
+        processStarted: ((Int32) throws -> Void)?,
+        shouldTerminate: (() throws -> Bool)?
     ) throws -> ToolResult
 }
 
@@ -123,6 +142,26 @@ public extension ToolRunning {
             processStarted: nil
         )
     }
+
+    @discardableResult
+    func run(
+        tool: String,
+        arguments: [String],
+        environment: [String: String],
+        workingDirectory: URL?,
+        timeout: TimeInterval?,
+        processStarted: ((Int32) throws -> Void)?,
+        shouldTerminate: (() throws -> Bool)?
+    ) throws -> ToolResult {
+        try run(
+            tool: tool,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            timeout: timeout,
+            processStarted: processStarted
+        )
+    }
 }
 
 public struct ToolResult {
@@ -130,6 +169,8 @@ public struct ToolResult {
     public let output: String
     public let timedOut: Bool
 }
+
+typealias WaitPIDFunction = (pid_t, UnsafeMutablePointer<Int32>?, Int32) -> pid_t
 
 private final class OutputCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -149,7 +190,15 @@ private final class OutputCollector: @unchecked Sendable {
 }
 
 public final class ProcessToolRunner: ToolRunning {
-    public init() {}
+    private let waitPID: WaitPIDFunction
+
+    public init() {
+        self.waitPID = Darwin.waitpid
+    }
+
+    init(waitPID: @escaping WaitPIDFunction) {
+        self.waitPID = waitPID
+    }
 
     public func run(
         tool: String,
@@ -158,6 +207,26 @@ public final class ProcessToolRunner: ToolRunning {
         workingDirectory: URL?,
         timeout: TimeInterval?,
         processStarted: ((Int32) throws -> Void)? = nil
+    ) throws -> ToolResult {
+        try run(
+            tool: tool,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            timeout: timeout,
+            processStarted: processStarted,
+            shouldTerminate: nil
+        )
+    }
+
+    public func run(
+        tool: String,
+        arguments: [String],
+        environment: [String: String],
+        workingDirectory: URL?,
+        timeout: TimeInterval?,
+        processStarted: ((Int32) throws -> Void)?,
+        shouldTerminate: (() throws -> Bool)?
     ) throws -> ToolResult {
         var merged = ProcessInfo.processInfo.environment
         for (key, value) in environment {
@@ -169,6 +238,8 @@ public final class ProcessToolRunner: ToolRunning {
 
         let readHandle = pipe.fileHandleForReading
         let writeHandle = pipe.fileHandleForWriting
+        try setCloseOnExec(readHandle.fileDescriptor)
+        try setCloseOnExec(writeHandle.fileDescriptor)
         let readGroup = DispatchGroup()
         let readQueue = DispatchQueue(label: "XCSteward.ProcessToolRunner.output")
         let collector = OutputCollector()
@@ -200,9 +271,18 @@ public final class ProcessToolRunner: ToolRunning {
         }
         let deadline = timeout.map { Date().addingTimeInterval($0) }
         while true {
-            if let status = pollExitStatus(pid: pid) {
-                waitForOutputDrain(readHandle: readHandle, readGroup: readGroup)
-                return ToolResult(exitCode: exitCode(fromWaitStatus: status), output: String(data: collector.snapshot(), encoding: .utf8) ?? "", timedOut: false)
+            do {
+                if let status = try pollExitStatus(pid: pid) {
+                    waitForOutputDrain(readHandle: readHandle, readGroup: readGroup)
+                    return ToolResult(exitCode: exitCode(fromWaitStatus: status), output: String(data: collector.snapshot(), encoding: .utf8) ?? "", timedOut: false)
+                }
+            } catch {
+                _ = terminateProcessGroup(pid: pid, readHandle: readHandle, readGroup: readGroup)
+                throw error
+            }
+            if try shouldTerminate?() == true {
+                let status = terminateProcessGroup(pid: pid, readHandle: readHandle, readGroup: readGroup)
+                return ToolResult(exitCode: status.map(exitCode(fromWaitStatus:)) ?? 128 + SIGTERM, output: String(data: collector.snapshot(), encoding: .utf8) ?? "", timedOut: false)
             }
             if let deadline, Date() > deadline {
                 let status = terminateProcessGroup(pid: pid, readHandle: readHandle, readGroup: readGroup)
@@ -261,6 +341,16 @@ public final class ProcessToolRunner: ToolRunning {
         return pid
     }
 
+    private func setCloseOnExec(_ descriptor: Int32) throws {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags >= 0 else {
+            throw XCStewardError.commandFailed("Unable to inspect file descriptor flags: \(String(cString: strerror(errno)))")
+        }
+        guard fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+            throw XCStewardError.commandFailed("Unable to mark file descriptor close-on-exec: \(String(cString: strerror(errno)))")
+        }
+    }
+
     private func configureFileActions(
         _ fileActions: inout posix_spawn_file_actions_t?,
         outputDescriptor: Int32,
@@ -275,7 +365,7 @@ public final class ProcessToolRunner: ToolRunning {
     }
 
     private func configureProcessGroup(_ attributes: inout posix_spawnattr_t?) {
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
     }
 
@@ -306,32 +396,34 @@ public final class ProcessToolRunner: ToolRunning {
         }
     }
 
-    private func pollExitStatus(pid: pid_t) -> Int32? {
+    private func pollExitStatus(pid: pid_t) throws -> Int32? {
         var status: Int32 = 0
         while true {
-            let result = waitpid(pid, &status, WNOHANG)
+            let result = waitPID(pid, &status, WNOHANG)
             if result == pid {
                 return status
             }
             if result == 0 {
                 return nil
             }
-            if errno == EINTR {
+            let waitError = errno
+            if waitError == EINTR {
                 continue
             }
-            return status
+            throw XCStewardError.commandFailed("Unable to monitor process \(pid): \(String(cString: strerror(waitError)))")
         }
     }
 
     private func waitForExit(pid: pid_t, timeout: TimeInterval) -> Int32? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let status = pollExitStatus(pid: pid) {
-                return status
+            guard let status = try? pollExitStatus(pid: pid) else {
+                Thread.sleep(forTimeInterval: 0.05)
+                continue
             }
-            Thread.sleep(forTimeInterval: 0.05)
+            return status
         }
-        return pollExitStatus(pid: pid)
+        return try? pollExitStatus(pid: pid)
     }
 
     private func waitForOutputDrain(readHandle: FileHandle, readGroup: DispatchGroup) {

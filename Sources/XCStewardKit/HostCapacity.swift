@@ -5,8 +5,10 @@ struct HostCapacitySnapshot: Codable, Sendable {
     var configuredMaxJobs: Int
     var effectiveMaxJobs: Int
     var reasons: [String]
+    var memoryPressureSamplingEnabled: Bool
     var memoryPressure: String?
     var memoryPressureSource: String?
+    var thermalStateSamplingEnabled: Bool
     var thermalState: String?
     var thermalStateSource: String?
     var loadAverage: Double?
@@ -26,8 +28,10 @@ struct HostCapacitySnapshot: Codable, Sendable {
         case configuredMaxJobs = "configured_max_jobs"
         case effectiveMaxJobs = "effective_max_jobs"
         case reasons
+        case memoryPressureSamplingEnabled = "memory_pressure_sampling_enabled"
         case memoryPressure = "memory_pressure"
         case memoryPressureSource = "memory_pressure_source"
+        case thermalStateSamplingEnabled = "thermal_state_sampling_enabled"
         case thermalState = "thermal_state"
         case thermalStateSource = "thermal_state_source"
         case loadAverage = "load_average"
@@ -67,6 +71,8 @@ final class HostCapacityController {
         let env = environment.processInfo.environment
         var effectiveMax = configuredMax
         var reasons: [String] = []
+        let memoryPressureSamplingEnabled = parser.bool(env["XCSTEWARD_SAMPLE_MEMORY_PRESSURE"])
+        let thermalStateSamplingEnabled = parser.bool(env["XCSTEWARD_SAMPLE_THERMAL_STATE"])
 
         let memoryPressureSample = memoryPressure()
         let memoryPressure = memoryPressureSample.value
@@ -151,8 +157,10 @@ final class HostCapacityController {
             configuredMaxJobs: configuredMax,
             effectiveMaxJobs: max(0, effectiveMax),
             reasons: reasons,
+            memoryPressureSamplingEnabled: memoryPressureSamplingEnabled,
             memoryPressure: memoryPressure,
             memoryPressureSource: memoryPressureSample.source,
+            thermalStateSamplingEnabled: thermalStateSamplingEnabled,
             thermalState: thermalState,
             thermalStateSource: thermalStateSample.source,
             loadAverage: loadAverage,

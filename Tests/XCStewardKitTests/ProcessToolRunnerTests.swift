@@ -33,6 +33,64 @@ final class ProcessToolRunnerTests: XCTestCase {
         XCTAssertGreaterThan(result.output.count, 65_536)
     }
 
+    func testProcessToolRunnerContinuesAfterInterruptedWaitPID() throws {
+        let temp = try makeTempDirectory()
+        let bin = temp.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try writeExecutable(
+            """
+            #!/bin/bash
+            set -euo pipefail
+            echo ok
+            """,
+            to: bin.appendingPathComponent("quick-success")
+        )
+        let waiter = ScriptedWaitPID(firstError: EINTR)
+        let runner = ProcessToolRunner(waitPID: waiter.wait)
+
+        let result = try runner.run(
+            tool: "quick-success",
+            arguments: [],
+            environment: ["PATH": "\(bin.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")"],
+            workingDirectory: nil,
+            timeout: 5
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertTrue(result.output.contains("ok"))
+    }
+
+    func testProcessToolRunnerThrowsWhenWaitPIDFailsUnexpectedly() throws {
+        let temp = try makeTempDirectory()
+        let bin = temp.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try writeExecutable(
+            """
+            #!/bin/bash
+            set -euo pipefail
+            while true; do
+              sleep 1
+            done
+            """,
+            to: bin.appendingPathComponent("long-running")
+        )
+        let waiter = ScriptedWaitPID(firstError: ECHILD)
+        let runner = ProcessToolRunner(waitPID: waiter.wait)
+
+        XCTAssertThrowsError(
+            try runner.run(
+                tool: "long-running",
+                arguments: [],
+                environment: ["PATH": "\(bin.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")"],
+                workingDirectory: nil,
+                timeout: 5
+            )
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("Unable to monitor process"))
+        }
+    }
+
     func testProcessToolRunnerForcesExitWhenTimedOutProcessIgnoresTerminate() throws {
         let temp = try makeTempDirectory()
         let bin = temp.appendingPathComponent("bin")
@@ -109,5 +167,30 @@ final class ProcessToolRunnerTests: XCTestCase {
 
         XCTAssertTrue(result.timedOut)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+}
+
+private final class ScriptedWaitPID: @unchecked Sendable {
+    private let lock = NSLock()
+    private let firstError: Int32
+    private var hasReturnedFirstError = false
+
+    init(firstError: Int32) {
+        self.firstError = firstError
+    }
+
+    func wait(pid: pid_t, status: UnsafeMutablePointer<Int32>?, options: Int32) -> pid_t {
+        lock.lock()
+        let shouldReturnFirstError = !hasReturnedFirstError
+        if shouldReturnFirstError {
+            hasReturnedFirstError = true
+        }
+        lock.unlock()
+
+        if shouldReturnFirstError {
+            errno = firstError
+            return -1
+        }
+        return Darwin.waitpid(pid, status, options)
     }
 }

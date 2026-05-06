@@ -216,6 +216,8 @@ final class HostCapacityTests: XCTestCase {
             parseJSON(String(contentsOf: stateRoot.appendingPathComponent("host-health.json"))) as? [String: Any]
         )
         XCTAssertEqual(health["effective_max_jobs"] as? Int, 1)
+        XCTAssertEqual(health["memory_pressure_sampling_enabled"] as? Bool, true)
+        XCTAssertEqual(health["thermal_state_sampling_enabled"] as? Bool, false)
         XCTAssertEqual(health["memory_pressure"] as? String, "warning")
         XCTAssertEqual(health["memory_pressure_source"] as? String, "sampled")
         XCTAssertTrue((health["reasons"] as? [String])?.contains("memory_pressure=warning") == true)
@@ -247,6 +249,7 @@ final class HostCapacityTests: XCTestCase {
             parseJSON(String(contentsOf: stateRoot.appendingPathComponent("host-health.json"))) as? [String: Any]
         )
         XCTAssertEqual(health["memory_pressure"] as? String, "normal")
+        XCTAssertEqual(health["memory_pressure_sampling_enabled"] as? Bool, true)
         XCTAssertEqual(health["memory_pressure_source"] as? String, "env")
         XCTAssertFalse((health["reasons"] as? [String])?.contains("memory_pressure=warning") == true)
         if FileManager.default.fileExists(atPath: fakeTools.log.path) {
@@ -278,6 +281,8 @@ final class HostCapacityTests: XCTestCase {
             parseJSON(String(contentsOf: stateRoot.appendingPathComponent("host-health.json"))) as? [String: Any]
         )
         XCTAssertEqual(health["effective_max_jobs"] as? Int, 1)
+        XCTAssertEqual(health["memory_pressure_sampling_enabled"] as? Bool, false)
+        XCTAssertEqual(health["thermal_state_sampling_enabled"] as? Bool, true)
         XCTAssertEqual(health["thermal_state"] as? String, "serious")
         XCTAssertEqual(health["thermal_state_source"] as? String, "sampled")
         XCTAssertTrue((health["reasons"] as? [String])?.contains("thermal_state=serious") == true)
@@ -309,6 +314,7 @@ final class HostCapacityTests: XCTestCase {
             parseJSON(String(contentsOf: stateRoot.appendingPathComponent("host-health.json"))) as? [String: Any]
         )
         XCTAssertEqual(health["thermal_state"] as? String, "nominal")
+        XCTAssertEqual(health["thermal_state_sampling_enabled"] as? Bool, true)
         XCTAssertEqual(health["thermal_state_source"] as? String, "env")
         XCTAssertFalse((health["reasons"] as? [String])?.contains("thermal_state=serious") == true)
         if FileManager.default.fileExists(atPath: fakeTools.log.path) {
