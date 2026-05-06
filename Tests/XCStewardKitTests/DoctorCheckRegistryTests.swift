@@ -38,6 +38,7 @@ final class DoctorCheckRegistryTests: XCTestCase {
                 "project.showdestinations_runnable",
                 "project.testplan_exists",
                 "project.derived_data_isolation",
+                "project.protected_path_warning",
                 "project.xcode_managed_parallel_workers",
                 "project.package_resolution_preflight",
                 "project.xctestrun_integrity",

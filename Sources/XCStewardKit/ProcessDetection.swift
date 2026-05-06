@@ -11,6 +11,32 @@ enum RunnerProcessPolicy {
 }
 
 enum RunnerProcessDetector {
+    private static let executorXcodebuildActions: Set<String> = [
+        "build-for-testing",
+        "test",
+        "test-without-building",
+    ]
+    private static let xcodebuildOptionsWithValues: Set<String> = [
+        "-configuration",
+        "-destination",
+        "-destination-timeout",
+        "-derivedDataPath",
+        "-maximum-parallel-testing-workers",
+        "-only-test-configuration",
+        "-parallel-testing-worker-count",
+        "-project",
+        "-resultBundlePath",
+        "-resultBundleVersion",
+        "-resultStreamPath",
+        "-scheme",
+        "-sdk",
+        "-skip-test-configuration",
+        "-testPlan",
+        "-testProductsPath",
+        "-workspace",
+        "-xctestrun",
+    ]
+
     static func records(from processListOutput: String) -> [ProcessRecord] {
         processListOutput
             .split(separator: "\n")
@@ -50,9 +76,7 @@ enum RunnerProcessDetector {
                 return true
             }
             if executables.contains("xcodebuild") {
-                return command.contains(" test") ||
-                    command.contains("test-without-building") ||
-                    command.contains("build-for-testing")
+                return hasExecutorXcodebuildAction(command)
             }
             return false
         }
@@ -64,10 +88,40 @@ enum RunnerProcessDetector {
 
     private static func executableNames(in processLine: String) -> Set<String> {
         Set(
-            processLine
-                .split(whereSeparator: \.isWhitespace)
-                .map(String.init)
+            commandTokens(in: processLine)
                 .map { URL(fileURLWithPath: $0).lastPathComponent }
         )
+    }
+
+    private static func hasExecutorXcodebuildAction(_ command: String) -> Bool {
+        let tokens = commandTokens(in: command)
+        guard let xcodebuildIndex = tokens.firstIndex(where: {
+            URL(fileURLWithPath: $0).lastPathComponent == "xcodebuild"
+        }) else {
+            return false
+        }
+        var skipNextValue = false
+        for token in tokens.dropFirst(xcodebuildIndex + 1) {
+            if skipNextValue {
+                skipNextValue = false
+                continue
+            }
+            if executorXcodebuildActions.contains(token) {
+                return true
+            }
+            if xcodebuildOptionsWithValues.contains(token) {
+                skipNextValue = true
+            }
+        }
+        return false
+    }
+
+    private static func commandTokens(in command: String) -> [String] {
+        command
+            .split(whereSeparator: \.isWhitespace)
+            .map { token in
+                String(token).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            }
+            .filter { !$0.isEmpty }
     }
 }

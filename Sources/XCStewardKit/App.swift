@@ -48,6 +48,8 @@ public struct XCStewardApp {
             return try handleArtifacts(arguments: arguments, store: try StateStore(environment: environment))
         case "cancel":
             return try handleCancel(arguments: arguments, store: try StateStore(environment: environment))
+        case "cleanup":
+            return try handleCleanup(arguments: arguments, store: try StateStore(environment: environment))
         case "doctor":
             return try handleDoctor(arguments: arguments, store: try StateStore(environment: environment))
         case "_internal":
@@ -84,6 +86,8 @@ public struct XCStewardApp {
                 return Self.artifactsHelp(executableName: executableName)
             case "cancel":
                 return Self.cancelHelp(executableName: executableName)
+            case "cleanup":
+                return Self.cleanupHelp(executableName: executableName)
             case "doctor":
                 return Self.doctorHelp(executableName: executableName)
             case "_internal":
@@ -113,6 +117,7 @@ public struct XCStewardApp {
           logs       Print the combined log for a job.
           artifacts  Show artifact paths for a job.
           cancel     Cancel a queued or running job.
+          cleanup    Remove old terminal job records and artifact directories.
           doctor     Run environment and project diagnostics.
 
         Global options:
@@ -199,6 +204,24 @@ public struct XCStewardApp {
         """
     }
 
+    private static func cleanupHelp(executableName: String) -> String {
+        """
+        Usage:
+          \(executableName) [--state-root <path>] cleanup [options]
+
+        Options:
+          --apply                 Delete selected terminal jobs. Defaults to dry-run.
+          --dry-run               Report selected terminal jobs without deleting.
+          --older-than <duration> Select terminal jobs older than this age. Default: 7d.
+                                  Supports s, m, h, and d suffixes.
+          --keep-last <count>     Always keep this many newest terminal jobs. Default: 20.
+          --max-total-size <size> Select oldest eligible jobs until terminal job bytes are
+                                  under this budget. Supports b, kb, mb, and gb suffixes.
+          --json                  Print cleanup report as JSON.
+          --help, -h              Show this command help.
+        """
+    }
+
     private static func doctorHelp(executableName: String) -> String {
         """
         Usage:
@@ -206,7 +229,8 @@ public struct XCStewardApp {
 
         Options:
           --project <name>  Restrict checks to a configured project profile.
-          --fix             Apply supported remediations automatically.
+          --fix             Apply safe XCSteward-scoped remediations automatically.
+          --fix-global      Also apply broad CoreSimulator remediations. Implies --fix.
           --json            Print the doctor report as JSON.
           --help, -h        Show this command help.
         """
@@ -368,12 +392,116 @@ public struct XCStewardApp {
         return 0
     }
 
+    private func handleCleanup(arguments: [String], store: StateStore) throws -> Int32 {
+        var arguments = arguments
+        let json = removeFlag("--json", from: &arguments)
+        let apply = removeFlag("--apply", from: &arguments)
+        let dryRunFlag = removeFlag("--dry-run", from: &arguments)
+        if apply && dryRunFlag {
+            throw XCStewardError.usage("cleanup cannot combine --apply and --dry-run")
+        }
+        let olderThan = try consumeOption("--older-than", from: &arguments)
+            .map(parseCleanupDuration(_:)) ?? (7 * 24 * 60 * 60)
+        let keepLast = try consumeOption("--keep-last", from: &arguments)
+            .map { try parseNonNegativeInteger($0, option: "--keep-last") } ?? 20
+        let maxTotalBytes = try consumeOption("--max-total-size", from: &arguments)
+            .map(parseCleanupSize(_:))
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("cleanup received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+
+        let report = try CleanupService(environment: environment).cleanupTerminalJobs(
+            store: store,
+            olderThanSeconds: olderThan,
+            keepLast: keepLast,
+            maxTotalBytes: maxTotalBytes,
+            dryRun: !apply
+        )
+        if json {
+            FileHandle.standardOutput.write(try jsonData(report))
+        } else if report.dryRun {
+            print("Dry run: \(report.candidateCount) terminal job(s) eligible for cleanup")
+            for candidate in report.candidates {
+                let bytes = candidate.bytes.map(String.init) ?? "unknown"
+                print("\(candidate.jobID) \(candidate.state.rawValue) \(candidate.reason) \(bytes) \(candidate.jobDirectory)")
+            }
+        } else {
+            print("Deleted \(report.deletedCount) terminal job(s)")
+        }
+        return 0
+    }
+
+    private func parseCleanupDuration(_ value: String) throws -> TimeInterval {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else {
+            throw XCStewardError.usage("cleanup --older-than requires a duration")
+        }
+        let unit = trimmed.last.map(String.init) ?? "s"
+        let multiplier: TimeInterval
+        let numberText: String
+        switch unit {
+        case "s":
+            multiplier = 1
+            numberText = String(trimmed.dropLast())
+        case "m":
+            multiplier = 60
+            numberText = String(trimmed.dropLast())
+        case "h":
+            multiplier = 60 * 60
+            numberText = String(trimmed.dropLast())
+        case "d":
+            multiplier = 24 * 60 * 60
+            numberText = String(trimmed.dropLast())
+        default:
+            multiplier = 1
+            numberText = trimmed
+        }
+        guard let amount = Double(numberText), amount >= 0 else {
+            throw XCStewardError.usage("cleanup --older-than must be a non-negative duration")
+        }
+        return amount * multiplier
+    }
+
+    private func parseNonNegativeInteger(_ value: String, option: String) throws -> Int {
+        guard let parsed = Int(value), parsed >= 0 else {
+            throw XCStewardError.usage("\(option) must be a non-negative integer")
+        }
+        return parsed
+    }
+
+    private func parseCleanupSize(_ value: String) throws -> Int64 {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else {
+            throw XCStewardError.usage("cleanup --max-total-size requires a size")
+        }
+        let units: [(suffix: String, multiplier: Double)] = [
+            ("gb", 1_073_741_824),
+            ("g", 1_073_741_824),
+            ("mb", 1_048_576),
+            ("m", 1_048_576),
+            ("kb", 1_024),
+            ("k", 1_024),
+            ("b", 1),
+        ]
+        let match = units.first { trimmed.hasSuffix($0.suffix) }
+        let numberText = match.map { String(trimmed.dropLast($0.suffix.count)) } ?? trimmed
+        let multiplier = match?.multiplier ?? 1
+        guard let amount = Double(numberText), amount >= 0, amount <= Double(Int64.max) / multiplier else {
+            throw XCStewardError.usage("cleanup --max-total-size must be a non-negative size")
+        }
+        return Int64((amount * multiplier).rounded(.down))
+    }
+
     private func handleDoctor(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
-        let fix = removeFlag("--fix", from: &arguments)
+        let fixGlobal = removeFlag("--fix-global", from: &arguments)
+        let fix = removeFlag("--fix", from: &arguments) || fixGlobal
         let project = consumeOption("--project", from: &arguments)
-        let report = try DoctorEngine(environment: environment, store: store).run(project: project, fix: fix)
+        let report = try DoctorEngine(environment: environment, store: store).run(
+            project: project,
+            fixOptions: DoctorFixOptions(applySafeFixes: fix, applyGlobalFixes: fixGlobal)
+        )
         if json {
             FileHandle.standardOutput.write(try jsonData(report))
         } else {

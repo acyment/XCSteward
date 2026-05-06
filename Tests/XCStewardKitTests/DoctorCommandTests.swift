@@ -3,6 +3,14 @@ import XCTest
 @testable import XCStewardKit
 
 final class DoctorCommandTests: XCTestCase {
+    func testDoctorHelpDocumentsGlobalFixGate() throws {
+        let result = try runCLI(arguments: ["doctor", "--help"])
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stdout.contains("--fix-global"))
+        XCTAssertTrue(result.stdout.contains("CoreSimulator"))
+    }
+
     func testDoctorFailsWhenNoRunnableIOSSimulatorDestinationExists() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -25,6 +33,28 @@ final class DoctorCommandTests: XCTestCase {
         let destinations = try result.check("project.showdestinations_runnable")
         XCTAssertEqual(destinations["status"] as? String, "fail")
         XCTAssertTrue((destinations["message"] as? String)?.contains("iOS Simulator") == true)
+    }
+
+    func testDoctorParsesSpacedIOSSimulatorDestinationFields() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .spacedIOSSimulatorDestination)
+        try createProfile(
+            name: "destinations",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            """
+        )
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, project: "destinations", environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        let destinations = try result.check("project.showdestinations_runnable")
+        XCTAssertEqual(destinations["status"] as? String, "pass")
     }
 
     func testDoctorFailsWhenConfiguredTestPlanIsMissing() throws {
@@ -159,6 +189,41 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertTrue((protectedPath["message"] as? String)?.contains("protected") == true)
     }
 
+    func testDoctorWarnsWhenProjectProfilePathsAreProtected() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let protectedOutput = temp.appendingPathComponent("protected-output")
+        let fakeTools = try makeFakeToolEnvironment(
+            scenario: .listSchemes,
+            extraEnv: [
+                "XCSTEWARD_DOCTOR_PROTECTED_PATHS": "\(repoRoot.path):\(protectedOutput.path)",
+            ]
+        )
+        try createProfile(
+            name: "protected-profile",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            [env]
+            DERIVED_DATA_PATH = "\(protectedOutput.appendingPathComponent("DerivedData").path)"
+            """
+        )
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, project: "protected-profile", environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        XCTAssertEqual(result.overallStatus, "warn")
+        let protectedPath = try result.check("project.protected_path_warning")
+        XCTAssertEqual(protectedPath["status"] as? String, "warn")
+        let message = try XCTUnwrap(protectedPath["message"] as? String)
+        XCTAssertTrue(message.contains("repo_root"))
+        XCTAssertTrue(message.contains("project_path"))
+        XCTAssertTrue(message.contains("DERIVED_DATA_PATH"))
+    }
+
     func testDoctorFailsWhenConfiguredBootedSimulatorDoesNotRespondToBootstatus() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -230,6 +295,58 @@ final class DoctorCommandTests: XCTestCase {
         let integrity = try result.check("project.xctestrun_integrity")
         XCTAssertEqual(integrity["status"] as? String, "fail")
         XCTAssertTrue((integrity["message"] as? String)?.contains(".xctestrun") == true)
+    }
+
+    func testDoctorRejectsStaleXCTestRunFromIntegrityScratch() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .staleDoctorXCTestRun)
+        try createProfile(
+            name: "stale-xctestrun",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            """
+        )
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, project: "stale-xctestrun", environment: fakeTools.env)
+
+        XCTAssertNotEqual(result.cli.status, 0)
+        XCTAssertEqual(result.overallStatus, "fail")
+        let integrity = try result.check("project.xctestrun_integrity")
+        XCTAssertEqual(integrity["status"] as? String, "fail")
+        XCTAssertTrue((integrity["message"] as? String)?.contains("current-build .xctestrun") == true)
+    }
+
+    func testDoctorCleansXCTestRunIntegrityScratchDirectory() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .success)
+        try createProfile(
+            name: "clean-xctestrun",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            """
+        )
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, project: "clean-xctestrun", environment: fakeTools.env)
+
+        let integrity = try result.check("project.xctestrun_integrity")
+        XCTAssertEqual(integrity["status"] as? String, "pass")
+        let scratchProfileRoot = stateRoot
+            .appendingPathComponent("doctor/xctestrun-integrity/clean-xctestrun")
+        let leftovers = (try? FileManager.default.contentsOfDirectory(
+            at: scratchProfileRoot,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        XCTAssertTrue(leftovers.isEmpty, "Unexpected doctor scratch leftovers: \(leftovers.map(\.path))")
     }
 
     func testDoctorFailsWhenModernXCResultToolParserIsUnavailable() throws {
@@ -373,6 +490,53 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertTrue((runtime["message"] as? String)?.contains("runtime") == true)
     }
 
+    func testDoctorParsesTextualSimulatorRuntimeAvailability() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .textualSimulatorRuntimeAvailability)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertNotEqual(result.cli.status, 0)
+        XCTAssertEqual(result.overallStatus, "fail")
+        let installed = try result.check("global.simulator_runtime_installed")
+        XCTAssertEqual(installed["status"] as? String, "pass")
+        let unavailable = try result.check("global.simulator_runtime_unavailable")
+        XCTAssertEqual(unavailable["status"] as? String, "warn")
+        let dyld = try result.check("global.runtime_dyld_cache_state")
+        XCTAssertEqual(dyld["status"] as? String, "fail")
+        XCTAssertTrue((dyld["message"] as? String)?.contains("dyld") == true)
+    }
+
+    func testDoctorDoesNotAcceptNegativeTextualSimulatorRuntimeAvailability() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .negativeTextSimulatorRuntimeAvailability)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertNotEqual(result.cli.status, 0)
+        XCTAssertEqual(result.overallStatus, "fail")
+        let installed = try result.check("global.simulator_runtime_installed")
+        XCTAssertEqual(installed["status"] as? String, "fail")
+    }
+
+    func testDoctorParsesSimulatorRuntimeAvailabilityFlags() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .flagSimulatorRuntimeAvailability)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        XCTAssertEqual(result.overallStatus, "warn")
+        let installed = try result.check("global.simulator_runtime_installed")
+        XCTAssertEqual(installed["status"] as? String, "pass")
+        let unavailable = try result.check("global.simulator_runtime_unavailable")
+        XCTAssertEqual(unavailable["status"] as? String, "warn")
+        XCTAssertTrue((unavailable["message"] as? String)?.contains("ios 17.4") == true)
+    }
+
     func testDoctorWarnsWhenInstalledSimulatorRuntimeIsUnavailable() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -416,12 +580,59 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertTrue((devices["message"] as? String)?.contains("Old iPhone") == true)
     }
 
-    func testDoctorFixDeletesUnavailableSimulatorDevices() throws {
+    func testDoctorWarnsWhenTextualUnavailableSimulatorDevicesExist() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .textualUnavailableSimulatorDevice)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        XCTAssertEqual(result.overallStatus, "warn")
+        let devices = try result.check("global.unavailable_devices_cleanup")
+        XCTAssertEqual(devices["status"] as? String, "warn")
+        XCTAssertTrue((devices["message"] as? String)?.contains("Text Old iPhone") == true)
+        XCTAssertTrue((devices["message"] as? String)?.contains("Snake Old iPhone") == true)
+    }
+
+    func testDoctorWarnsWhenUnavailableSimulatorDeviceFlagsExist() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .flagUnavailableSimulatorDevice)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        XCTAssertEqual(result.overallStatus, "warn")
+        let devices = try result.check("global.unavailable_devices_cleanup")
+        XCTAssertEqual(devices["status"] as? String, "warn")
+        XCTAssertTrue((devices["message"] as? String)?.contains("Int Old iPhone") == true)
+        XCTAssertTrue((devices["message"] as? String)?.contains("No Old iPhone") == true)
+    }
+
+    func testDoctorFixDoesNotDeleteUnavailableSimulatorDevices() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
         let fakeTools = try makeFakeToolEnvironment(scenario: .unavailableSimulatorDevice)
 
         let result = try runDoctorCommand(stateRoot: stateRoot, fix: true, environment: fakeTools.env)
+
+        XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
+        XCTAssertEqual(result.overallStatus, "warn")
+        let devices = try result.check("global.unavailable_devices_cleanup")
+        XCTAssertEqual(devices["status"] as? String, "warn")
+        XCTAssertEqual(devices["fixed"] as? Bool, false)
+        XCTAssertTrue((devices["manual_action"] as? String)?.contains("--fix-global") == true)
+        let log = try String(contentsOf: fakeTools.log)
+        XCTAssertFalse(log.contains("xcrun simctl delete unavailable"))
+    }
+
+    func testDoctorFixGlobalDeletesUnavailableSimulatorDevices() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .unavailableSimulatorDevice)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, fixGlobal: true, environment: fakeTools.env)
 
         XCTAssertEqual(result.cli.status, 0, "stderr: \(result.cli.stderr)")
         XCTAssertEqual(result.overallStatus, "pass")
@@ -531,6 +742,19 @@ final class DoctorCommandTests: XCTestCase {
         let sdk = try result.check("global.iphonesimulator_sdk_present")
         XCTAssertEqual(sdk["status"] as? String, "fail")
         XCTAssertTrue((sdk["message"] as? String)?.contains("iphonesimulator") == true)
+    }
+
+    func testDoctorDoesNotAcceptShowSDKsWarningAsSimulatorSDK() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let fakeTools = try makeFakeToolEnvironment(scenario: .showsdksWarningOnly)
+
+        let result = try runDoctorCommand(stateRoot: stateRoot, environment: fakeTools.env)
+
+        XCTAssertNotEqual(result.cli.status, 0)
+        XCTAssertEqual(result.overallStatus, "fail")
+        let sdk = try result.check("global.iphonesimulator_sdk_present")
+        XCTAssertEqual(sdk["status"] as? String, "fail")
     }
 
     func testDoctorFallsBackToPlatformBundleWhenShowSDKsFails() throws {
@@ -645,6 +869,7 @@ private func runDoctorCommand(
     stateRoot: URL,
     project: String? = nil,
     fix: Bool = false,
+    fixGlobal: Bool = false,
     environment: [String: String],
     file: StaticString = #filePath,
     line: UInt = #line
@@ -658,6 +883,9 @@ private func runDoctorCommand(
     }
     if fix {
         arguments.append("--fix")
+    }
+    if fixGlobal {
+        arguments.append("--fix-global")
     }
     arguments.append("--json")
 

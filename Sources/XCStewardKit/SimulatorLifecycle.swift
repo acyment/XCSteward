@@ -62,7 +62,7 @@ final class SimulatorLifecycle: @unchecked Sendable {
     func bootSimulator(simulatorID: String, context: ToolExecutionContext) throws {
         let profile = context.profile
         let boot = try runSimulatorBoot(simulatorID: simulatorID, context: context)
-        let alreadyBooted = boot.output.contains("current state: Booted")
+        let alreadyBooted = simctlOutput(boot.output, indicatesCurrentState: .booted)
 
         do {
             try confirmBootStatus(
@@ -200,7 +200,7 @@ final class SimulatorLifecycle: @unchecked Sendable {
             context: context
         )
         try tooling.throwIfCanceled(shutdown, context: context)
-        if shutdown.exitCode != 0 && !shutdown.output.contains("current state: Shutdown") {
+        if shutdown.exitCode != 0 && !simctlOutput(shutdown.output, indicatesCurrentState: .shutdown) {
             throw tooling.commandFailed("Unable to shutdown simulator \(simulatorID) before cloning", output: shutdown.output)
         }
     }
@@ -283,7 +283,7 @@ final class SimulatorLifecycle: @unchecked Sendable {
         let profile = context.profile
         let list = try tooling.runTool(
             tool: "xcrun",
-            arguments: ["simctl", "list", "devices"],
+            arguments: ["simctl", "list", "devices", "--json"],
             timeout: profile.timeouts.boot,
             context: context
         )
@@ -291,7 +291,11 @@ final class SimulatorLifecycle: @unchecked Sendable {
         if list.exitCode != 0 || list.timedOut {
             throw tooling.commandFailed("Unable to list simulators for managed simulator '\(managed.name)'", output: list.output)
         }
-        return parseSimulatorID(from: list.output, preferredName: managed.name)
+        do {
+            return try parseManagedSimulatorID(from: list.output, managed: managed)
+        } catch {
+            throw tooling.commandFailed("Unable to parse simulator list for managed simulator '\(managed.name)'", output: list.output)
+        }
     }
 
     func createManagedSimulator(_ managed: ManagedSimulator, context: ToolExecutionContext) throws -> String {
@@ -327,7 +331,7 @@ final class SimulatorLifecycle: @unchecked Sendable {
             context: context
         )
         try tooling.throwIfCanceled(boot, context: context)
-        if boot.exitCode != 0 && !boot.output.contains("current state: Booted") {
+        if boot.exitCode != 0 && !simctlOutput(boot.output, indicatesCurrentState: .booted) {
             throw XCStewardError.commandFailed("Unable to boot simulator \(simulatorID)")
         }
         return boot
@@ -354,21 +358,62 @@ final class SimulatorLifecycle: @unchecked Sendable {
         return .commandFailed("Unable to confirm simulator boot status for \(simulatorID): \(detail)")
     }
 
-    private func parseSimulatorID(from output: String, preferredName: String?) -> String? {
-        for line in output.split(separator: "\n") {
-            let string = String(line)
-            if let preferredName, !string.contains(preferredName) { continue }
-            var searchStart = string.startIndex
-            while let open = string[searchStart...].firstIndex(of: "("),
-                  let close = string[open...].dropFirst().firstIndex(of: ")") {
-                let candidate = String(string[string.index(after: open)..<close]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !candidate.isEmpty && !isSimulatorStatus(candidate) {
-                    return candidate
+    private enum SimulatorState: String {
+        case booted
+        case shutdown
+    }
+
+    private func simctlOutput(_ output: String, indicatesCurrentState expectedState: SimulatorState) -> Bool {
+        output
+            .split(whereSeparator: \.isNewline)
+            .contains { line in
+                let words = line
+                    .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                    .map { String($0).lowercased() }
+                guard let currentIndex = words.firstIndex(of: "current") else {
+                    return false
                 }
-                searchStart = string.index(after: close)
+                let stateLabelIndex = currentIndex + 1
+                let stateValueIndex = currentIndex + 2
+                return words.indices.contains(stateValueIndex) &&
+                    words[stateLabelIndex] == "state" &&
+                    words[stateValueIndex] == expectedState.rawValue
+            }
+    }
+
+    private func parseManagedSimulatorID(from output: String, managed: ManagedSimulator) throws -> String? {
+        let data = Data(output.utf8)
+        let list = try JSONDecoder().decode(SimctlDeviceList.self, from: data)
+        let candidates = list.devices.flatMap { runtime, devices in
+            devices.compactMap { device -> ManagedSimulatorCandidate? in
+                guard device.name == managed.name,
+                      device.isAvailableForUse,
+                      device.matchesConfiguredDeviceType(managed.deviceType),
+                      let udid = device.udid?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !udid.isEmpty else {
+                    return nil
+                }
+                return ManagedSimulatorCandidate(
+                    runtime: runtime,
+                    udid: udid,
+                    hasKnownMatchingDeviceType: device.hasKnownMatchingDeviceType(managed.deviceType)
+                )
             }
         }
+        let runtimeMatches = candidates.filter { CoreSimulatorRuntime.matches($0.runtime, managed.runtime) }
+        if let runtimeMatch = preferredManagedSimulatorCandidate(in: runtimeMatches) {
+            return runtimeMatch.udid
+        }
+        if let fallback = preferredManagedSimulatorCandidate(in: candidates) {
+            return fallback.udid
+        }
         return nil
+    }
+
+    private func preferredManagedSimulatorCandidate(
+        in candidates: [ManagedSimulatorCandidate]
+    ) -> ManagedSimulatorCandidate? {
+        candidates.first(where: \.hasKnownMatchingDeviceType) ?? candidates.first
     }
 
     private func simulatorPrivacyArguments(
@@ -428,13 +473,90 @@ final class SimulatorLifecycle: @unchecked Sendable {
         return true
     }
 
-    private func isSimulatorStatus(_ value: String) -> Bool {
-        let statuses: Set<String> = [
-            "Shutdown",
-            "Booted",
-            "Creating",
-            "Shutting Down",
-        ]
-        return statuses.contains(value)
+}
+
+private struct SimctlDeviceList: Decodable {
+    var devices: [String: [SimctlDevice]]
+}
+
+private struct SimctlDevice: Decodable {
+    var name: String?
+    var udid: String?
+    var state: String?
+    var deviceTypeIdentifier: String?
+    var isAvailable: Bool?
+    var availability: String?
+    var availabilityError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case udid
+        case state
+        case deviceTypeIdentifier
+        case deviceType
+        case deviceTypeSnakeCase = "device_type"
+        case isAvailable
+        case availability
+        case availabilityError
+        case availabilityErrorSnakeCase = "availability_error"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        udid = try container.decodeIfPresent(String.self, forKey: .udid)
+        state = try container.decodeIfPresent(String.self, forKey: .state)
+        deviceTypeIdentifier = try container.decodeIfPresent(String.self, forKey: .deviceTypeIdentifier)
+            ?? (try container.decodeIfPresent(String.self, forKey: .deviceType))
+            ?? (try container.decodeIfPresent(String.self, forKey: .deviceTypeSnakeCase))
+        isAvailable = CoreSimulatorAvailability.decodeFlag(from: container, forKey: .isAvailable)
+        availability = try container.decodeIfPresent(String.self, forKey: .availability)
+        availabilityError = try container.decodeIfPresent(String.self, forKey: .availabilityError)
+            ?? (try container.decodeIfPresent(String.self, forKey: .availabilityErrorSnakeCase))
+    }
+
+    var isAvailableForUse: Bool {
+        if isAvailable == false {
+            return false
+        }
+        if let availabilityError, !availabilityError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return false
+        }
+        if let availability,
+           CoreSimulatorAvailability.textIndicatesUnavailable(availability) {
+            return false
+        }
+        if let state, state.localizedCaseInsensitiveContains("unavailable") {
+            return false
+        }
+        return true
+    }
+
+    func matchesConfiguredDeviceType(_ configuredDeviceType: String) -> Bool {
+        guard let deviceTypeIdentifier = trimmedDeviceTypeIdentifier else {
+            return true
+        }
+        return CoreSimulatorDeviceType.matches(deviceTypeIdentifier, configuredDeviceType)
+    }
+
+    func hasKnownMatchingDeviceType(_ configuredDeviceType: String) -> Bool {
+        guard let deviceTypeIdentifier = trimmedDeviceTypeIdentifier else {
+            return false
+        }
+        return CoreSimulatorDeviceType.matches(deviceTypeIdentifier, configuredDeviceType)
+    }
+
+    private var trimmedDeviceTypeIdentifier: String? {
+        guard let value = deviceTypeIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+}
+
+private struct ManagedSimulatorCandidate {
+    var runtime: String
+    var udid: String
+    var hasKnownMatchingDeviceType: Bool
 }

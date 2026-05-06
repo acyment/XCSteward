@@ -5,9 +5,12 @@ enum FakeScenario: String {
     case manualShards = "manual_shards"
     case manualShardMergeFailure = "manual_shard_merge_failure"
     case manualShardBootstrapRetry = "manual_shard_bootstrap_retry"
+    case manualShardBootstrapRetryWithPartialResult = "manual_shard_bootstrap_retry_with_partial_result"
+    case manualShardFatalShortCircuit = "manual_shard_fatal_short_circuit"
     case manualShardsConcurrent = "manual_shards_concurrent"
     case buildFailure = "build_failure"
     case bootstrapRetry = "bootstrap_retry"
+    case bootstrapRetryWithPartialResult = "bootstrap_retry_with_partial_result"
     case bootStatusFailure = "boot_status_failure"
     case bootedSimulatorNeedsRecovery = "booted_simulator_needs_recovery"
     case slowSuccess = "slow_success"
@@ -32,18 +35,26 @@ enum FakeScenario: String {
     case commandLineToolsSelection = "command_line_tools_selection"
     case missingFirstLaunchComponents = "missing_first_launch_components"
     case missingIPhoneSimulatorSDK = "missing_iphonesimulator_sdk"
+    case showsdksWarningOnly = "showsdks_warning_only"
     case showsdksFailureWithSDKOnDisk = "showsdks_failure_with_sdk_on_disk"
     case noAvailableSimulatorRuntime = "no_available_simulator_runtime"
+    case textualSimulatorRuntimeAvailability = "textual_simulator_runtime_availability"
+    case negativeTextSimulatorRuntimeAvailability = "negative_text_simulator_runtime_availability"
+    case flagSimulatorRuntimeAvailability = "flag_simulator_runtime_availability"
     case unavailableSimulatorRuntime = "unavailable_simulator_runtime"
     case runtimeDyldCacheUnavailable = "runtime_dyld_cache_unavailable"
     case unavailableSimulatorDevice = "unavailable_simulator_device"
+    case textualUnavailableSimulatorDevice = "textual_unavailable_simulator_device"
+    case flagUnavailableSimulatorDevice = "flag_unavailable_simulator_device"
     case hungCoreSimulatorList = "hung_coresimulator_list"
     case concurrentRunnerContention = "concurrent_runner_contention"
     case missingProcessLister = "missing_process_lister"
     case noRunnableDestinations = "no_runnable_destinations"
+    case spacedIOSSimulatorDestination = "spaced_ios_simulator_destination"
     case missingTestPlan = "missing_test_plan"
     case packageResolutionFailure = "package_resolution_failure"
     case missingXCTestRun = "missing_xctestrun"
+    case staleDoctorXCTestRun = "stale_doctor_xctestrun"
     case legacyXCResultTool = "legacy_xcresulttool"
     case xcodebuildMCPProcess = "xcodebuildmcp_process"
     case simulatorAppProcess = "simulator_app_process"
@@ -187,6 +198,12 @@ private enum FakeToolScripts {
               if [[ "$SCENARIO" == "missing_iphonesimulator_sdk" ]]; then
                 cat <<'TXT'
             iOS SDKs:
+                iOS 18.0                         -sdk iphoneos18.0
+            TXT
+              elif [[ "$SCENARIO" == "showsdks_warning_only" ]]; then
+                cat <<'TXT'
+            xcodebuild: warning: iphonesimulator platform support was not found
+            iOS SDKs:
             	iOS 18.0                      	-sdk iphoneos18.0
             TXT
               else
@@ -217,6 +234,11 @@ private enum FakeToolScripts {
                 cat <<'TXT'
             Available destinations for the "Demo" scheme:
             	{ platform:macOS, arch:arm64, name:My Mac }
+            TXT
+              elif [[ "$SCENARIO" == "spaced_ios_simulator_destination" ]]; then
+                cat <<'TXT'
+            Available destinations for the "Demo" scheme:
+                { platform : iOS Simulator, id : SIM-123, OS : 18.0, name : iPhone 17 Pro }
             TXT
               else
                 cat <<'TXT'
@@ -283,6 +305,8 @@ private enum FakeToolScripts {
                 touch "$DERIVED/Build/Products/Demo_Stable_iphonesimulator18.0-arm64.xctestrun"
               elif [[ "$SCENARIO" == "missing_xctestrun" ]]; then
                 echo "Skipping .xctestrun generation for scenario"
+              elif [[ "$SCENARIO" == "stale_doctor_xctestrun" ]]; then
+                touch -t 200001010000 "$DERIVED/Build/Products/stale.xctestrun"
               else
                 touch "$DERIVED/Build/Products/fake.xctestrun"
               fi
@@ -335,7 +359,7 @@ private enum FakeToolScripts {
                   ONLY_VALUES+=("${args[$i]#-only-testing:}")
                 fi
               done
-              if [[ ( "$SCENARIO" == "manual_shards" || "$SCENARIO" == "manual_shard_merge_failure" || "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shards_concurrent" ) && "$ENUMERATE_TESTS" -eq 1 ]]; then
+              if [[ ( "$SCENARIO" == "manual_shards" || "$SCENARIO" == "manual_shard_merge_failure" || "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" || "$SCENARIO" == "manual_shard_fatal_short_circuit" || "$SCENARIO" == "manual_shards_concurrent" ) && "$ENUMERATE_TESTS" -eq 1 ]]; then
                 mkdir -p "$(dirname "$ENUMERATION_OUTPUT")"
                 cat <<'JSON' > "$ENUMERATION_OUTPUT"
             {"tests":[{"identifier":"DemoTests/FooTests/testA"},{"identifier":"DemoTests/FooTests/testB"},{"identifier":"DemoTests/BarTests/testC"},{"identifier":"DemoTests/BarTests/testD"}]}
@@ -350,11 +374,23 @@ private enum FakeToolScripts {
               fi
               COUNT=$((COUNT + 1))
               echo "$COUNT" > "$COUNT_FILE"
-              if [[ "$SCENARIO" == "bootstrap_retry" && "$COUNT" -eq 1 ]]; then
+              if [[ ( "$SCENARIO" == "bootstrap_retry" || "$SCENARIO" == "bootstrap_retry_with_partial_result" ) && "$COUNT" -eq 1 ]]; then
+                if [[ "$SCENARIO" == "bootstrap_retry_with_partial_result" ]]; then
+                  mkdir -p "$RESULT"
+                  cat <<'JSON' > "$RESULT/summary.json"
+            {"testsCount":0,"testsFailedCount":0,"testsSkippedCount":0}
+            JSON
+                fi
                 echo "Failed to background test runner" >&2
                 exit 74
               fi
-              if [[ "$SCENARIO" == "manual_shard_bootstrap_retry" ]] && mkdir "$ROOT/manual-shard-bootstrap-failed.lock" 2>/dev/null; then
+              if [[ "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" ]] && mkdir "$ROOT/manual-shard-bootstrap-failed.lock" 2>/dev/null; then
+                if [[ "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" ]]; then
+                  mkdir -p "$RESULT"
+                  cat <<'JSON' > "$RESULT/summary.json"
+            {"testsCount":0,"testsFailedCount":0,"testsSkippedCount":0}
+            JSON
+                fi
                 echo "Failed to background test runner" >&2
                 exit 74
               fi
@@ -454,12 +490,30 @@ private enum FakeToolScripts {
                 record_event "start" "test" "$RESULT"
                 sleep 4
               fi
+              if [[ "$SCENARIO" == "manual_shard_fatal_short_circuit" ]]; then
+                if [[ "$RESULT" == *"shard-000"* ]]; then
+                  touch "$ROOT/fatal-shard-started"
+                  for _ in {1..100}; do
+                    if [[ -f "$ROOT/peer-shard-started" ]]; then
+                      break
+                    fi
+                    sleep 0.05
+                  done
+                  echo "There are no test bundles available to test." >&2
+                  exit 74
+                fi
+                trap 'echo "manual shard peer received SIGTERM" >> "$LOG"; exit 143' TERM
+                touch "$ROOT/peer-shard-started"
+                while true; do
+                  sleep 1
+                done
+              fi
               mkdir -p "$RESULT"
               if [[ "$SCENARIO" == "manual_shards_concurrent" ]]; then
                 record_event "start" "manual-shard" "$RESULT"
                 sleep 2
               fi
-              if [[ "$SCENARIO" == "manual_shards" || "$SCENARIO" == "manual_shard_merge_failure" || "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shards_concurrent" ]]; then
+              if [[ "$SCENARIO" == "manual_shards" || "$SCENARIO" == "manual_shard_merge_failure" || "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" || "$SCENARIO" == "manual_shards_concurrent" ]]; then
                 cat <<JSON > "$RESULT/summary.json"
             {"testsCount":$ONLY_COUNT,"testsFailedCount":0,"testsSkippedCount":0}
             JSON
@@ -540,6 +594,18 @@ private enum FakeToolScripts {
                   cat <<'JSON'
             {"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.tvOS-18-0","name":"tvOS 18.0","isAvailable":true}]}
             JSON
+                elif [[ "$SCENARIO" == "textual_simulator_runtime_availability" ]]; then
+                  cat <<'JSON'
+            {"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.ios-18-0","name":"ios 18.0","availability":"(available)"},{"identifier":"com.apple.CoreSimulator.SimRuntime.ios-17-4","name":"ios 17.4","availability":"(unavailable, dyld shared cache is missing)"}]}
+            JSON
+                elif [[ "$SCENARIO" == "negative_text_simulator_runtime_availability" ]]; then
+                  cat <<'JSON'
+            {"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.ios-18-0","name":"ios 18.0","availability":"not available for this platform"}]}
+            JSON
+                elif [[ "$SCENARIO" == "flag_simulator_runtime_availability" ]]; then
+                  cat <<'JSON'
+            {"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.ios-18-0","name":"ios 18.0","isAvailable":"YES"},{"identifier":"com.apple.CoreSimulator.SimRuntime.ios-17-4","name":"ios 17.4","isAvailable":0}]}
+            JSON
                 elif [[ "$SCENARIO" == "unavailable_simulator_runtime" ]]; then
                   cat <<'JSON'
             {"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","name":"iOS 18.0","isAvailable":true},{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-17-4","name":"iOS 17.4","isAvailable":false}]}
@@ -572,9 +638,31 @@ private enum FakeToolScripts {
                 exit 0
               fi
               if [[ "$1" == "list" && "$2" == "devices" && "${3:-}" == "--json" ]]; then
+                if [[ "$SCENARIO" == "managed_simulator_list_hangs" ]]; then
+                  child=""
+                  trap 'echo "managed simctl list received SIGTERM" >> "$LOG"; if [[ -n "$child" ]]; then kill "$child" 2>/dev/null || true; fi; exit 143' TERM
+                  touch "$ROOT/managed-list-started"
+                  while true; do
+                    sleep 1 &
+                    child="$!"
+                    wait "$child" || true
+                  done
+                fi
                 if [[ "$SCENARIO" == "unavailable_simulator_device" ]]; then
                   cat <<'JSON'
             {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":true},{"name":"Old iPhone","udid":"SIM-OLD","state":"Shutdown","isAvailable":false,"availabilityError":"runtime is unavailable"}]}}
+            JSON
+                elif [[ "$SCENARIO" == "textual_unavailable_simulator_device" ]]; then
+                  cat <<'JSON'
+            {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":"YES"},{"name":"Text Old iPhone","udid":"SIM-TEXT","state":"Shutdown","availability":"not available (runtime profile not found)"},{"name":"Snake Old iPhone","udid":"SIM-SNAKE","state":"Shutdown","availability_error":"runtime is unavailable"}]}}
+            JSON
+                elif [[ "$SCENARIO" == "flag_unavailable_simulator_device" ]]; then
+                  cat <<'JSON'
+            {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":"YES"},{"name":"Int Old iPhone","udid":"SIM-INT","state":"Shutdown","isAvailable":0},{"name":"No Old iPhone","udid":"SIM-NO","state":"Shutdown","isAvailable":"NO"}]}}
+            JSON
+                elif [[ "$SCENARIO" == "managed_simulator_status_line" ]]; then
+                  cat <<'JSON'
+            {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"Publiqueitor Test iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":true}]}}
             JSON
                 else
                   cat <<'JSON'

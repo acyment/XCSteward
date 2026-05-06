@@ -6,15 +6,25 @@ private enum DoctorProbeFailure: Error {
     case invalidJSON
 }
 
+private struct ProtectedProfilePath {
+    var label: String
+    var url: URL
+}
+
 struct DoctorProjectCheckContext {
     let profile: ProjectProfile
-    let fix: Bool
+    let fixOptions: DoctorFixOptions
     let schemeAvailable: Bool
+}
+
+struct DoctorFixOptions {
+    let applySafeFixes: Bool
+    let applyGlobalFixes: Bool
 }
 
 struct DoctorGlobalCheckDescriptor: @unchecked Sendable {
     let id: String
-    let run: (DoctorEngine, Bool) throws -> [DoctorCheck]
+    let run: (DoctorEngine, DoctorFixOptions) throws -> [DoctorCheck]
 }
 
 struct DoctorProjectCheckDescriptor: @unchecked Sendable {
@@ -55,8 +65,8 @@ final class DoctorEngine {
         DoctorGlobalCheckDescriptor(id: "global.runtime_dyld_cache_state") { engine, _ in
             [try engine.runtimeDyldCacheStateCheck()]
         },
-        DoctorGlobalCheckDescriptor(id: "global.unavailable_devices_cleanup") { engine, fix in
-            [try engine.unavailableDevicesCleanupCheck(fix: fix)]
+        DoctorGlobalCheckDescriptor(id: "global.unavailable_devices_cleanup") { engine, fixOptions in
+            [try engine.unavailableDevicesCleanupCheck(fixOptions: fixOptions)]
         },
         DoctorGlobalCheckDescriptor(id: "global.coresim_list_json_health") { engine, _ in
             [try engine.coreSimulatorListJSONHealthCheck()]
@@ -73,11 +83,11 @@ final class DoctorEngine {
         DoctorGlobalCheckDescriptor(id: "global.xcode_cli_alignment") { engine, _ in
             [try engine.xcodeCLIAlignmentCheck()]
         },
-        DoctorGlobalCheckDescriptor(id: "global.worker_lease") { engine, fix in
-            [try engine.workerLeaseHealthCheck(fix: fix)]
+        DoctorGlobalCheckDescriptor(id: "global.worker_lease") { engine, fixOptions in
+            [try engine.workerLeaseHealthCheck(fix: fixOptions.applySafeFixes)]
         },
-        DoctorGlobalCheckDescriptor(id: "global.simulator_leases") { engine, fix in
-            [try engine.simulatorLeaseHealthCheck(fix: fix)]
+        DoctorGlobalCheckDescriptor(id: "global.simulator_leases") { engine, fixOptions in
+            [try engine.simulatorLeaseHealthCheck(fix: fixOptions.applySafeFixes)]
         },
     ]
 
@@ -100,6 +110,9 @@ final class DoctorEngine {
         DoctorProjectCheckDescriptor(id: "project.derived_data_isolation") { engine, context in
             [engine.derivedDataIsolationCheck(profile: context.profile)]
         },
+        DoctorProjectCheckDescriptor(id: "project.protected_path_warning") { engine, context in
+            [engine.projectProtectedPathWarningCheck(profile: context.profile)]
+        },
         DoctorProjectCheckDescriptor(id: "project.xcode_managed_parallel_workers") { engine, context in
             [engine.parallelCloneRiskCheck(profile: context.profile)]
         },
@@ -119,7 +132,7 @@ final class DoctorEngine {
             return [try engine.configuredSimulatorBootstatusCheck(profile: context.profile, simulatorID: simulatorID)]
         },
         DoctorProjectCheckDescriptor(id: "project.managed_simulator") { engine, context in
-            try engine.managedSimulatorCheck(profile: context.profile, fix: context.fix)
+            try engine.managedSimulatorCheck(profile: context.profile, fix: context.fixOptions.applySafeFixes)
         },
     ]
 
@@ -155,12 +168,12 @@ final class DoctorEngine {
         )
     }
 
-    func run(project: String?, fix: Bool) throws -> DoctorReport {
-        var checks = try runGlobalChecks(fix: fix)
+    func run(project: String?, fixOptions: DoctorFixOptions) throws -> DoctorReport {
+        var checks = try runGlobalChecks(fixOptions: fixOptions)
 
         if let project {
             let profile = try profileLoader.loadProfile(named: project)
-            checks.append(contentsOf: try projectChecks(profile: profile, fix: fix))
+            checks.append(contentsOf: try projectChecks(profile: profile, fixOptions: fixOptions))
         }
 
         let overallStatus: DoctorStatus
@@ -176,9 +189,9 @@ final class DoctorEngine {
         return report
     }
 
-    private func runGlobalChecks(fix: Bool) throws -> [DoctorCheck] {
+    private func runGlobalChecks(fixOptions: DoctorFixOptions) throws -> [DoctorCheck] {
         try Self.globalCheckRegistry.flatMap { descriptor in
-            try descriptor.run(self, fix)
+            try descriptor.run(self, fixOptions)
         }
     }
 
@@ -317,9 +330,9 @@ final class DoctorEngine {
         )
     }
 
-    private func projectChecks(profile: ProjectProfile, fix: Bool) throws -> [DoctorCheck] {
+    private func projectChecks(profile: ProjectProfile, fixOptions: DoctorFixOptions) throws -> [DoctorCheck] {
         let schemeAvailable = try isSchemeAvailable(profile: profile)
-        let context = DoctorProjectCheckContext(profile: profile, fix: fix, schemeAvailable: schemeAvailable)
+        let context = DoctorProjectCheckContext(profile: profile, fixOptions: fixOptions, schemeAvailable: schemeAvailable)
         return try Self.projectCheckRegistry.flatMap { descriptor in
             try descriptor.run(self, context)
         }
@@ -534,7 +547,7 @@ final class DoctorEngine {
                 manualAction: "Run xcodebuild -showdestinations for the configured project and scheme"
             )
         }
-        guard result.output.contains("platform:iOS Simulator") else {
+        guard DoctorOutputParsers.showDestinationsOutputExposesIOSSimulator(result.output) else {
             return DoctorCheck(
                 id: "project.showdestinations_runnable",
                 status: .fail,
@@ -665,6 +678,29 @@ final class DoctorEngine {
         )
     }
 
+    private func projectProtectedPathWarningCheck(profile: ProjectProfile) -> DoctorCheck {
+        let matches = protectedProfilePaths(profile: profile).compactMap { entry -> String? in
+            let normalized = normalizePath(entry.url.path)
+            guard let matched = protectedPathPrefix(for: normalized) else {
+                return nil
+            }
+            return "\(entry.label): \(normalized) under \(matched)"
+        }
+        guard !matches.isEmpty else {
+            return makeCheck(
+                id: "project.protected_path_warning",
+                status: .pass,
+                message: "Project profile paths are not under known protected paths"
+            )
+        }
+        return makeCheck(
+            id: "project.protected_path_warning",
+            status: .warn,
+            message: "Project profile paths are under protected or high-risk paths: \(matches.joined(separator: "; "))",
+            manualAction: "Move repo roots, project/workspace paths, and explicit build output overrides to developer-owned paths"
+        )
+    }
+
     private func packageResolutionPreflightCheck(profile: ProjectProfile, schemeAvailable: Bool) throws -> DoctorCheck {
         guard schemeAvailable else {
             return DoctorCheck(
@@ -717,8 +753,8 @@ final class DoctorEngine {
         let root = environment.paths.doctorRoot
             .appendingPathComponent("xctestrun-integrity")
             .appendingPathComponent(profile.name)
+            .appendingPathComponent(environment.uuidProvider.makeUUID())
         let derivedData = root.appendingPathComponent("DerivedData")
-        try? environment.fileSystem.removeItem(root)
         try environment.fileSystem.createDirectory(root)
 
         var arguments = xcodebuildProjectArguments(for: profile, includeScheme: true)
@@ -731,37 +767,60 @@ final class DoctorEngine {
         }
         arguments.append("build-for-testing")
 
-        let build = try environment.toolRunner.run(
-            tool: "xcodebuild",
-            arguments: arguments,
-            environment: profile.env,
-            workingDirectory: profile.workingDirectory,
-            timeout: profile.timeouts.build
-        )
+        let buildStartedAt = Date()
+        let build: ToolResult
+        do {
+            build = try environment.toolRunner.run(
+                tool: "xcodebuild",
+                arguments: arguments,
+                environment: profile.env,
+                workingDirectory: profile.workingDirectory,
+                timeout: profile.timeouts.build
+            )
+        } catch {
+            return xctestrunIntegrityCheckAfterCleanup(
+                makeCheck(
+                    id: "project.xctestrun_integrity",
+                    status: .fail,
+                    message: "build-for-testing could not run while validating .xctestrun generation: \(error)",
+                    manualAction: "Run xcodebuild build-for-testing for the configured scheme and fix the reported build issue"
+                ),
+                scratchRoot: root
+            )
+        }
         guard build.exitCode == 0, !build.timedOut else {
-            return makeCheck(
-                id: "project.xctestrun_integrity",
-                status: .fail,
-                message: "build-for-testing failed while validating .xctestrun generation",
-                manualAction: "Run xcodebuild build-for-testing for the configured scheme and fix the reported build issue"
+            return xctestrunIntegrityCheckAfterCleanup(
+                makeCheck(
+                    id: "project.xctestrun_integrity",
+                    status: .fail,
+                    message: "build-for-testing failed while validating .xctestrun generation",
+                    manualAction: "Run xcodebuild build-for-testing for the configured scheme and fix the reported build issue"
+                ),
+                scratchRoot: root
             )
         }
 
         let productsRoot = derivedData.appendingPathComponent("Build/Products")
-        let xctestrunFiles = findXCTestRunFiles(under: productsRoot)
+        let xctestrunFiles = findCurrentBuildXCTestRunFiles(under: productsRoot, buildStartedAt: buildStartedAt)
         guard let xctestrun = xctestrunFiles.first else {
-            return makeCheck(
-                id: "project.xctestrun_integrity",
-                status: .fail,
-                message: "build-for-testing completed but did not produce a .xctestrun file",
-                manualAction: "Inspect \(productsRoot.path) and verify the scheme has test targets enabled for build-for-testing"
+            return xctestrunIntegrityCheckAfterCleanup(
+                makeCheck(
+                    id: "project.xctestrun_integrity",
+                    status: .fail,
+                    message: "build-for-testing completed but did not produce a current-build .xctestrun file",
+                    manualAction: "Inspect \(productsRoot.path) and verify the scheme has test targets enabled for build-for-testing"
+                ),
+                scratchRoot: root
             )
         }
 
-        return makeCheck(
-            id: "project.xctestrun_integrity",
-            status: .pass,
-            message: ".xctestrun generated successfully at \(xctestrun.lastPathComponent)"
+        return xctestrunIntegrityCheckAfterCleanup(
+            makeCheck(
+                id: "project.xctestrun_integrity",
+                status: .pass,
+                message: ".xctestrun generated successfully at \(xctestrun.lastPathComponent)"
+            ),
+            scratchRoot: root
         )
     }
 
@@ -1002,7 +1061,7 @@ final class DoctorEngine {
                 manualAction: "Run xcodebuild -showsdks and ensure simulator SDKs are installed for the selected Xcode"
             )
         }
-        guard showsdks.output.contains("iphonesimulator") else {
+        guard DoctorOutputParsers.showsSDKsOutputExposesIPhoneSimulatorSDK(showsdks.output) else {
             return DoctorCheck(
                 id: "global.iphonesimulator_sdk_present",
                 status: .fail,
@@ -1027,7 +1086,9 @@ final class DoctorEngine {
         guard bundledIPhoneSimulatorSDKExists(inDeveloperDir: developerDir) else {
             return nil
         }
-        guard probe.exitCode != 0 || probe.timedOut || !probe.output.contains("iphonesimulator") else {
+        guard probe.exitCode != 0 ||
+            probe.timedOut ||
+            !DoctorOutputParsers.showsSDKsOutputExposesIPhoneSimulatorSDK(probe.output) else {
             return nil
         }
 
@@ -1070,7 +1131,7 @@ final class DoctorEngine {
             return skipped
         }
 
-        let runtimes: [[String: Any]]
+        let runtimes: [CoreSimulatorRuntimeProbe]
         switch try runSimulatorRuntimesProbe() {
         case .success(let parsedRuntimes):
             runtimes = parsedRuntimes
@@ -1083,7 +1144,7 @@ final class DoctorEngine {
             )
         }
 
-        let hasAvailableIOSRuntime = runtimes.contains(where: { isIOSRuntime($0) && isAvailableRuntime($0) })
+        let hasAvailableIOSRuntime = runtimes.contains { $0.isIOSRuntime && $0.isAvailable }
         guard hasAvailableIOSRuntime else {
             return DoctorCheck(
                 id: "global.simulator_runtime_installed",
@@ -1113,7 +1174,7 @@ final class DoctorEngine {
             return skipped
         }
 
-        let runtimes: [[String: Any]]
+        let runtimes: [CoreSimulatorRuntimeProbe]
         switch try runSimulatorRuntimesProbe() {
         case .success(let parsedRuntimes):
             runtimes = parsedRuntimes
@@ -1126,7 +1187,7 @@ final class DoctorEngine {
             )
         }
 
-        let unavailableIOSRuntimes = runtimes.filter { isIOSRuntime($0) && !isAvailableRuntime($0) }
+        let unavailableIOSRuntimes = runtimes.filter { $0.isIOSRuntime && !$0.isAvailable }
         guard !unavailableIOSRuntimes.isEmpty else {
             return DoctorCheck(
                 id: "global.simulator_runtime_unavailable",
@@ -1139,7 +1200,7 @@ final class DoctorEngine {
         }
 
         let names = unavailableIOSRuntimes
-            .compactMap { $0["name"] as? String }
+            .map(\.displayName)
             .prefix(3)
             .joined(separator: ", ")
         return DoctorCheck(
@@ -1160,7 +1221,7 @@ final class DoctorEngine {
             return skipped
         }
 
-        let runtimes: [[String: Any]]
+        let runtimes: [CoreSimulatorRuntimeProbe]
         switch try runSimulatorRuntimesProbe() {
         case .success(let parsedRuntimes):
             runtimes = parsedRuntimes
@@ -1173,8 +1234,8 @@ final class DoctorEngine {
             )
         }
 
-        let dyldFailures = runtimes.filter { runtime in
-            isIOSRuntime(runtime) && runtimeAvailabilityText(runtime).localizedCaseInsensitiveContains("dyld")
+        let dyldFailures = runtimes.filter {
+            $0.isIOSRuntime && $0.availabilityText.localizedCaseInsensitiveContains("dyld")
         }
         guard !dyldFailures.isEmpty else {
             return makeCheck(
@@ -1185,7 +1246,7 @@ final class DoctorEngine {
         }
 
         let names = dyldFailures
-            .map { ($0["name"] as? String) ?? ($0["identifier"] as? String) ?? "unknown runtime" }
+            .map(\.displayName)
             .prefix(3)
             .joined(separator: ", ")
         return makeCheck(
@@ -1196,7 +1257,7 @@ final class DoctorEngine {
         )
     }
 
-    private func unavailableDevicesCleanupCheck(fix: Bool) throws -> DoctorCheck {
+    private func unavailableDevicesCleanupCheck(fixOptions: DoctorFixOptions) throws -> DoctorCheck {
         if let skipped = try skippedSimctlDependentCheck(
             id: "global.unavailable_devices_cleanup",
             summary: "unavailable Simulator device cleanup"
@@ -1204,21 +1265,26 @@ final class DoctorEngine {
             return skipped
         }
 
-        let devicesJSON: [String: Any]
-        switch try runJSONProbe(tool: "xcrun", arguments: ["simctl", "list", "devices", "--json"], timeout: 10) {
-        case .success(let json):
-            devicesJSON = json
+        let deviceList: CoreSimulatorDeviceListProbe
+        switch try runDecodableJSONProbe(
+            CoreSimulatorDeviceListProbe.self,
+            tool: "xcrun",
+            arguments: ["simctl", "list", "devices", "--json"],
+            timeout: 10
+        ) {
+        case .success(let parsedDeviceList):
+            deviceList = parsedDeviceList
         case .failure:
             return makeCheck(
                 id: "global.unavailable_devices_cleanup",
                 status: .warn,
                 message: "Unable to inspect unavailable Simulator devices",
                 autoFixable: true,
-                manualAction: "Run xcrun simctl delete unavailable after verifying CoreSimulator can list devices"
+                manualAction: "Run doctor --fix-global after verifying CoreSimulator can list devices"
             )
         }
 
-        let unavailableDevices = unavailableSimulatorDevices(in: devicesJSON)
+        let unavailableDevices = unavailableSimulatorDevices(in: deviceList)
         guard !unavailableDevices.isEmpty else {
             return makeCheck(
                 id: "global.unavailable_devices_cleanup",
@@ -1228,7 +1294,7 @@ final class DoctorEngine {
             )
         }
 
-        if fix {
+        if fixOptions.applyGlobalFixes {
             let delete = try environment.toolRunner.run(
                 tool: "xcrun",
                 arguments: ["simctl", "delete", "unavailable"],
@@ -1260,7 +1326,7 @@ final class DoctorEngine {
             status: .warn,
             message: "Unavailable Simulator devices were detected: \(names)",
             autoFixable: true,
-            manualAction: "Run doctor --fix to execute xcrun simctl delete unavailable"
+            manualAction: "Run doctor --fix-global to execute xcrun simctl delete unavailable"
         )
     }
 
@@ -1544,15 +1610,48 @@ final class DoctorEngine {
         return arguments
     }
 
-    private func runSimulatorRuntimesProbe() throws -> Result<[[String: Any]], DoctorProbeFailure> {
-        switch try runJSONProbe(tool: "xcrun", arguments: ["simctl", "list", "runtimes", "--json"], timeout: 10) {
-        case .success(let json):
-            guard let runtimes = json["runtimes"] as? [[String: Any]] else {
-                return .failure(.invalidJSON)
-            }
-            return .success(runtimes)
+    private func runSimulatorRuntimesProbe() throws -> Result<[CoreSimulatorRuntimeProbe], DoctorProbeFailure> {
+        switch try runDecodableJSONProbe(
+            CoreSimulatorRuntimeListProbe.self,
+            tool: "xcrun",
+            arguments: ["simctl", "list", "runtimes", "--json"],
+            timeout: 10
+        ) {
+        case .success(let probe):
+            return .success(probe.runtimes)
         case .failure(let failure):
             return .failure(failure)
+        }
+    }
+
+    private func runDecodableJSONProbe<T: Decodable>(
+        _ type: T.Type,
+        tool: String,
+        arguments: [String],
+        environment: [String: String] = [:],
+        workingDirectory: URL? = nil,
+        timeout: TimeInterval
+    ) throws -> Result<T, DoctorProbeFailure> {
+        let result = try self.environment.toolRunner.run(
+            tool: tool,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            timeout: timeout
+        )
+        if result.timedOut {
+            return .failure(.timedOut)
+        }
+        guard result.exitCode == 0 else {
+            return .failure(.nonZeroExit)
+        }
+        guard let data = result.output.data(using: .utf8) else {
+            return .failure(.invalidJSON)
+        }
+        do {
+            return .success(try JSONDecoder().decode(type, from: data))
+        } catch {
+            return .failure(.invalidJSON)
         }
     }
 
@@ -1602,60 +1701,11 @@ final class DoctorEngine {
         return []
     }
 
-    private func isIOSRuntime(_ runtime: [String: Any]) -> Bool {
-        if let identifier = runtime["identifier"] as? String, identifier.contains(".iOS-") {
-            return true
-        }
-        if let name = runtime["name"] as? String, name.hasPrefix("iOS") {
-            return true
-        }
-        return false
-    }
-
-    private func isAvailableRuntime(_ runtime: [String: Any]) -> Bool {
-        runtime["isAvailable"] as? Bool == true
-    }
-
-    private func runtimeAvailabilityText(_ runtime: [String: Any]) -> String {
-        [
-            runtime["availabilityError"] as? String,
-            runtime["availability_error"] as? String,
-            runtime["error"] as? String,
-            runtime["state"] as? String,
-        ]
-            .compactMap { $0 }
-            .joined(separator: " ")
-    }
-
-    private func unavailableSimulatorDevices(in json: [String: Any]) -> [String] {
-        guard let devicesByRuntime = json["devices"] as? [String: Any] else {
-            return []
-        }
-        var unavailable: [String] = []
-        for value in devicesByRuntime.values {
-            guard let devices = value as? [[String: Any]] else {
-                continue
-            }
-            for device in devices where isUnavailableSimulatorDevice(device) {
-                let name = device["name"] as? String
-                let udid = device["udid"] as? String
-                unavailable.append([name, udid].compactMap { $0 }.joined(separator: " "))
-            }
-        }
-        return unavailable
-    }
-
-    private func isUnavailableSimulatorDevice(_ device: [String: Any]) -> Bool {
-        if let available = device["isAvailable"] as? Bool, !available {
-            return true
-        }
-        if let state = device["state"] as? String, state.localizedCaseInsensitiveContains("unavailable") {
-            return true
-        }
-        if let availabilityError = device["availabilityError"] as? String, !availabilityError.isEmpty {
-            return true
-        }
-        return false
+    private func unavailableSimulatorDevices(in probe: CoreSimulatorDeviceListProbe) -> [String] {
+        probe.devices.values
+            .flatMap { $0 }
+            .filter(\.isUnavailable)
+            .map(\.displayName)
     }
 
     private func findXCTestRunFiles(under root: URL) -> [URL] {
@@ -1671,6 +1721,40 @@ final class DoctorEngine {
             }
         }
         return matches.sorted { $0.path < $1.path }
+    }
+
+    private func findCurrentBuildXCTestRunFiles(under root: URL, buildStartedAt: Date) -> [URL] {
+        findXCTestRunFiles(under: root)
+            .filter { xctestrunWasGeneratedByCurrentBuild($0, buildStartedAt: buildStartedAt) }
+    }
+
+    private func xctestrunWasGeneratedByCurrentBuild(_ file: URL, buildStartedAt: Date) -> Bool {
+        guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]) else {
+            return false
+        }
+        let threshold = buildStartedAt.addingTimeInterval(-1)
+        if let contentModificationDate = values.contentModificationDate,
+           contentModificationDate >= threshold {
+            return true
+        }
+        return false
+    }
+
+    private func xctestrunIntegrityCheckAfterCleanup(_ check: DoctorCheck, scratchRoot: URL) -> DoctorCheck {
+        do {
+            try environment.fileSystem.removeItem(scratchRoot)
+            return check
+        } catch {
+            let status: DoctorStatus = check.status == .pass ? .warn : check.status
+            return makeCheck(
+                id: check.id,
+                status: status,
+                message: "\(check.message); scratch cleanup failed at \(scratchRoot.path): \(error)",
+                autoFixable: check.autoFixable,
+                fixed: check.fixed,
+                manualAction: check.manualAction ?? "Remove stale doctor scratch directory \(scratchRoot.path)"
+            )
+        }
     }
 
     private func skippedSimctlDependentCheck(id: String, summary: String) throws -> DoctorCheck? {
@@ -1777,6 +1861,48 @@ final class DoctorEngine {
         protectedPathPrefixes().first { prefix in
             path == prefix || path.hasPrefix(prefix + "/")
         }
+    }
+
+    private func protectedProfilePaths(profile: ProjectProfile) -> [ProtectedProfilePath] {
+        let repoURL = URL(fileURLWithPath: profile.repoRoot).standardizedFileURL
+        var paths = [
+            ProtectedProfilePath(label: "repo_root", url: repoURL),
+        ]
+        if let projectPath = profile.projectPath, !projectPath.isEmpty {
+            paths.append(
+                ProtectedProfilePath(
+                    label: "project_path",
+                    url: profilePathURL(projectPath, relativeTo: repoURL)
+                )
+            )
+        }
+        if let workspacePath = profile.workspacePath, !workspacePath.isEmpty {
+            paths.append(
+                ProtectedProfilePath(
+                    label: "workspace_path",
+                    url: profilePathURL(workspacePath, relativeTo: repoURL)
+                )
+            )
+        }
+        for key in ["DERIVED_DATA_PATH", "SYMROOT", "OBJROOT"] {
+            guard let rawPath = profile.env[key], !rawPath.isEmpty else {
+                continue
+            }
+            paths.append(
+                ProtectedProfilePath(
+                    label: key,
+                    url: profilePathURL(rawPath, relativeTo: repoURL)
+                )
+            )
+        }
+        return paths
+    }
+
+    private func profilePathURL(_ path: String, relativeTo baseURL: URL) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        return baseURL.appendingPathComponent(path).standardizedFileURL
     }
 
     private func protectedPathPrefixes() -> [String] {
