@@ -2,6 +2,33 @@
 
 Local macOS CLI for coordinating iOS simulator test jobs across projects and coding agents.
 
+## Install
+
+XCSteward is currently installed from source:
+
+```bash
+swift build -c release
+mkdir -p "$HOME/.local/bin"
+cp .build/release/xcsteward "$HOME/.local/bin/xcsteward"
+```
+
+Add the install directory to your shell path if needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the binary and local host setup:
+
+```bash
+xcsteward --help
+xcsteward doctor --json
+```
+
+The default state root is `~/Library/Application Support/XCSteward`. Override
+it per command with `--state-root <path>` or for the process environment with
+`XCSTEWARD_HOME=<path>`.
+
 ## Commands
 
 Build:
@@ -49,12 +76,158 @@ xcsteward jobs [--json]
 xcsteward logs <job-id>
 xcsteward artifacts <job-id> [--json]
 xcsteward cancel <job-id> [--json]
-xcsteward doctor [--project <name>] [--fix] [--json]
+xcsteward cleanup [--dry-run] [--apply] [--older-than 7d] [--keep-last 20] [--max-total-size 50gb] [--json]
+xcsteward doctor [--project <name>] [--fix] [--fix-global] [--json]
 ```
+
+`cleanup` is dry-run by default. It only selects terminal jobs under the
+configured `jobs/` state-root directory, keeps the newest terminal jobs, skips
+active worker or simulator leases, and refuses live process IDs. `--max-total-size`
+also selects the oldest eligible terminal jobs until managed terminal-job bytes
+fit under the budget. Use `--apply` to delete the selected job directories and
+terminal job records.
 
 `doctor` reports stale worker and simulator lease records. With `--fix`, it
 removes simulator leases owned by dead XCSteward processes without touching
-active leases.
+active leases. Broad CoreSimulator cleanup, such as deleting unavailable
+devices, requires the explicit `--fix-global` flag.
+
+## JSON output contract
+
+Commands with `--json` write one JSON document to stdout when the requested
+object can be loaded. Some of those commands intentionally return a nonzero
+exit code after printing JSON, for example `status --json` for a failed job,
+`submit --wait --json` for a failed job, or `doctor --json` when a required
+check fails. When `--json` is present but the command fails before loading its
+requested object, XCSteward writes one JSON error document to stderr and leaves
+stdout empty:
+
+```json
+{
+  "error": {
+    "code": "usage",
+    "message": "submit requires --project"
+  }
+}
+```
+
+Stable command error codes are `usage`, `not_found`,
+`invalid_configuration`, `command_failed`, `canceled`, and
+`unexpected_error`.
+
+`submit --json`, `submit --wait --json`, `status --json`, and
+`cancel --json` return a job summary object:
+
+```json
+{
+  "job_id": "UUID",
+  "project": "demo",
+  "state": "queued",
+  "result_class": null,
+  "exit_code": null,
+  "submitted_at": 1760000000.0,
+  "started_at": null,
+  "finished_at": null,
+  "duration_seconds": null,
+  "test_plan": null,
+  "only_testing": [],
+  "simulator_id": null,
+  "counts": null,
+  "artifacts": {
+    "xcresult": null,
+    "combinedLog": null,
+    "buildLog": null,
+    "testLog": null,
+    "derivedData": null,
+    "diagnostics": null,
+    "junit": null
+  },
+  "summary_line": "UUID queued",
+  "metadata": {}
+}
+```
+
+Stable job states are `queued`, `running`, `succeeded`, `failed`, `canceled`,
+and `interrupted`. Stable result classes are `success`, `build_failure`,
+`test_failure`, `test_timeout`, `runner_bootstrap_failure`,
+`artifact_failure`, `canceled`, and `internal_error`. Timestamp fields are Unix
+epoch seconds as numbers. Nullable fields are present even when the value is
+not known yet.
+
+`jobs --json` returns an array of compact job objects:
+
+```json
+[
+  {
+    "job_id": "UUID",
+    "project": "demo",
+    "state": "succeeded",
+    "result_class": "success"
+  }
+]
+```
+
+`artifacts --json` returns the `artifacts` object from the terminal job
+summary. Paths are absolute local filesystem paths and can be `null` when that
+artifact was not produced.
+
+`cleanup --json` returns a cleanup report. By default `dry_run` is `true`; use
+`--apply` when the selected terminal job directories and records should be
+deleted:
+
+```json
+{
+  "dry_run": true,
+  "older_than_seconds": 604800,
+  "keep_last": 20,
+  "max_total_bytes": 53687091200,
+  "cutoff": 1760000000.0,
+  "total_managed_bytes": 120000000000,
+  "selected_bytes": 70000000000,
+  "candidate_count": 2,
+  "deleted_count": 0,
+  "candidates": [
+    {
+      "job_id": "UUID",
+      "state": "succeeded",
+      "result_class": "success",
+      "finished_at": 1760000000.0,
+      "job_directory": "/absolute/path/to/state/jobs/UUID",
+      "deleted": false,
+      "bytes": 35000000000,
+      "reason": "size_budget"
+    }
+  ]
+}
+```
+
+Cleanup candidate `reason` values are `age` and `size_budget`. `bytes` is the
+best-effort logical size of regular files under the job directory, and
+`max_total_bytes` is `null` when `--max-total-size` was not supplied.
+
+`doctor --json` returns:
+
+```json
+{
+  "overall_status": "pass",
+  "checks": [
+    {
+      "id": "global.xcode_available",
+      "status": "pass",
+      "message": "xcodebuild is available",
+      "auto_fixable": false,
+      "fixed": false,
+      "manual_action": null
+    }
+  ],
+  "profiles_checked": []
+}
+```
+
+Doctor statuses are `pass`, `warn`, and `fail`. Agents should treat unknown
+future fields as additive, preserve the full JSON object in logs, and make
+control-flow decisions from `state`, `result_class`, `overall_status`,
+`dry_run`, `candidate_count`, and `deleted_count`.
 
 Use `--state-root <path>` to point the CLI at a specific local state directory. By default it uses `~/Library/Application Support/XCSteward`.
 
@@ -85,11 +258,14 @@ slots while they are still starting.
 Set `XCSTEWARD_SAMPLE_MEMORY_PRESSURE=true` to sample macOS
 `memory_pressure` and reduce dispatch to one job when it reports warning,
 serious, or critical pressure. `XCSTEWARD_MEMORY_PRESSURE` can still inject an
-explicit value and takes precedence over sampling.
+explicit value and takes precedence over sampling. Memory-pressure sampling is
+off by default; `host-health.json` reports the policy as
+`memory_pressure_sampling_enabled`.
 Set `XCSTEWARD_SAMPLE_THERMAL_STATE=true` to sample `pmset -g therm` and reduce
 dispatch to one job when CPU thermal throttling maps to serious or critical
 state. `XCSTEWARD_THERMAL_STATE` can still inject an explicit value and takes
-precedence over sampling.
+precedence over sampling. Thermal sampling is off by default;
+`host-health.json` reports the policy as `thermal_state_sampling_enabled`.
 Set `XCSTEWARD_MAX_LOAD_AVERAGE` to reduce dispatch to one job when the host's
 1-minute load average reaches that threshold. `XCSTEWARD_LOAD_AVERAGE` can
 override the sampled load average in controlled environments.
@@ -106,6 +282,30 @@ Profiles live under:
 <state-root>/projects/<name>.toml
 ```
 
+Minimal profile:
+
+```toml
+repo_root = "/absolute/path/to/repo"
+project_path = "App.xcodeproj"
+scheme = "App"
+default_simulator_id = "SIM-UDID"
+```
+
+Set exactly one of `project_path` or `workspace_path`; use
+`workspace_path = "App.xcworkspace"` for workspace-based apps. `repo_root` and
+`scheme` are required. A simulator must come from `default_simulator_id`, an
+allowed `--simulator-id` override, or a `[managed_simulator]` block.
+
+Create and verify a profile:
+
+```bash
+STATE_ROOT="${XCSTEWARD_HOME:-$HOME/Library/Application Support/XCSteward}"
+mkdir -p "$STATE_ROOT/projects"
+$EDITOR "$STATE_ROOT/projects/demo.toml"
+xcsteward doctor --project demo
+xcsteward submit --project demo --wait --json
+```
+
 Example:
 
 ```toml
@@ -118,6 +318,7 @@ allowed_simulator_ids = ["SIM-123"]
 reset_policy = "none" # none | shutdown | erase
 
 [timeouts]
+# Positive seconds.
 boot = 30
 build = 600
 test = 600
@@ -128,14 +329,17 @@ timeout = 30
 
 [coverage]
 # Optional xcodebuild code coverage override. Omit the block to let the scheme decide.
+# `enabled` must be a boolean.
 enabled = true
 
 [result_stream]
 # Optional xcodebuild result stream artifact for test runs.
+# `enabled` must be a boolean.
 enabled = false
 
 [result_bundle]
 # Optional xcodebuild result bundle format version for test result bundles.
+# `version` must be a positive integer.
 version = 3
 
 [parallel]
@@ -171,17 +375,20 @@ collect = "on-failure" # on-failure | never
 
 [test_products]
 # Opt in to materializing job-scoped .xctestproducts during build-for-testing.
+# `enabled` and `use_for_testing` must be booleans.
 enabled = false
 # Also pass -testProductsPath to test-without-building instead of -xctestrun.
 use_for_testing = false
 
 [privacy]
 # Optional simctl privacy setup for each leased simulator before tests run.
+# `grant`, `revoke`, and `reset` must be arrays of service or service:bundle entries.
 reset = ["all"]
 grant = ["photos:com.example.App", "location:com.example.App"]
 revoke = ["microphone:com.example.App"]
 
 [env]
+# Environment values must be strings and are passed through verbatim.
 FOO = "bar"
 ```
 
@@ -300,10 +507,16 @@ It includes the job state, result classification, simulator UDID, selected
 Xcode version, macOS version, request filters, profile policy, and artifact
 paths. This file is intentionally separate from `JobSummary` so existing
 summary consumers do not need to migrate.
+When XCSteward retries an xcode-managed runner/bootstrap failure, it preserves
+the retryable first-attempt `.xcresult` under
+`artifacts/attempts/test-attempt-001/` and records it in `run-metadata.json`.
 XCSteward also snapshots `xcodebuild -help` into
 `artifacts/xcodebuild-help.txt` on a best-effort basis and links it from
 `run-metadata.json`. That artifact makes it easier to audit which Xcode flags
-the selected toolchain advertised for a run.
+the selected toolchain advertised for a run. Best-effort reporting probes that
+fail, time out, or produce unparseable output are recorded in
+`run-metadata.json` under `probe_warnings` with the probe source, command,
+exit code, timeout status, and a bounded output excerpt.
 
 Set `[test_products] enabled = true` to pass `-testProductsPath
 <job>/artifacts/test-products.xctestproducts` during `build-for-testing`.
@@ -349,7 +562,10 @@ XCSteward falls back to deterministic round-robin splitting.
 If a shard fails before XCTest really gets going, XCSteward retries that shard
 once after `simctl shutdown`, `simctl erase`, and a fresh boot of the leased
 simulator. The per-shard diagnostics include `attempts`, `retry_reason`, and
-`simulator_diagnostics` paths captured with `simctl diagnose -l`.
+`simulator_diagnostics` paths captured with `simctl diagnose -l`. Retryable
+first-attempt shard `.xcresult` bundles are preserved under
+`artifacts/shards/<shard-id>/attempts/attempt-001/` and linked from each
+retried shard's `attempt_artifacts`.
 
 ```toml
 default_simulator_id = "SIM-123"
@@ -387,3 +603,34 @@ clone_for_shards = true
 ```
 
 Sample dogfood profiles are under [Examples/profiles](/Users/acyment/dev/XCSteward/Examples/profiles).
+Agent workflow examples are under [Examples/agents](/Users/acyment/dev/XCSteward/Examples/agents).
+A minimal runnable iOS fixture is under [Examples/DemoApp](/Users/acyment/dev/XCSteward/Examples/DemoApp);
+copy [demo-app.toml.template](/Users/acyment/dev/XCSteward/Examples/profiles/demo-app.toml.template)
+into your state root with `__XCSTEWARD_REPO_ROOT__` replaced by this repository
+path to exercise the documented `doctor` and `submit --wait --json` flow.
+
+## Known limitations
+
+XCSteward is host-local. The queue, worker lease, simulator lease, and artifact
+state live under one state root on one Mac; distributed worker coordination is
+out of scope today.
+
+XCSteward depends on local Xcode and CoreSimulator behavior. It can recover
+from stale XCSteward-owned leases and targeted simulator failures, but broad
+host repair still requires an operator decision. `doctor --fix` is
+XCSteward-scoped by default, and global CoreSimulator cleanup requires
+`doctor --fix-global`.
+
+Artifacts are preserved for completed jobs, and retry attempts preserve their
+own attempt-specific bundles. The `cleanup` command provides conservative
+age-based terminal-job cleanup and optional total-size budgeting for terminal
+jobs under the XCSteward state root. Hosts still need disk monitoring for
+non-XCSteward storage and protected active jobs.
+
+`--json` result output is structured and stable enough for agents. Agents
+should parse stdout for loaded command results and stderr for command error
+documents, while still using the process exit code for the top-level outcome.
+
+Manual and hybrid sharding still rely on test enumeration and Xcode result
+tooling. If those tools change shape or fail, XCSteward records best-effort
+diagnostics but may need follow-up fixes for new Xcode releases.

@@ -1,0 +1,18 @@
+repo_root = "__XCSTEWARD_REPO_ROOT__/Examples/DemoApp"
+project_path = "DemoApp.xcodeproj"
+scheme = "DemoApp"
+
+[managed_simulator]
+name = "XCSteward Demo iPhone"
+device_type = "iPhone 17 Pro"
+runtime = "iOS 26.4"
+
+[parallel]
+mode = "xcode-managed"
+max_workers = 2
+exact_workers = false
+
+[timeouts]
+boot = 60
+build = 600
+test = 600
