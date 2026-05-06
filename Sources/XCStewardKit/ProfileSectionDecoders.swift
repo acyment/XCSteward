@@ -47,20 +47,16 @@ struct TOMLSectionReader {
         return nil
     }
 
-    func stringMap() -> [String: String] {
-        var result: [String: String] = [:]
-        for (key, value) in values {
-            if case let .string(string) = value {
-                result[key] = string
-            }
-        }
-        return result
-    }
 }
 
 enum ProfileSectionDecoders {
     static func parallel(profileName: String, reader: TOMLSectionReader) throws -> ParallelSettings {
-        let parallelModeRaw = reader.string("mode") ?? ParallelMode.xcodeManaged.rawValue
+        let parallelModeRaw = try optionalEnumString(
+            profileName: profileName,
+            keyPath: "parallel.mode",
+            reader: reader,
+            key: "mode"
+        ) ?? ParallelMode.xcodeManaged.rawValue
         guard let parallelMode = ParallelMode(rawValue: parallelModeRaw) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) has unsupported parallel.mode '\(parallelModeRaw)'")
         }
@@ -162,8 +158,12 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return XCTestDiagnosticSettings()
         }
-        guard let collectRaw = reader.string("collect")?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !collectRaw.isEmpty else {
+        guard let collectRaw = try optionalEnumString(
+            profileName: profileName,
+            keyPath: "test_diagnostics.collect",
+            reader: reader,
+            key: "collect"
+        ) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) test_diagnostics.collect is required when [test_diagnostics] is present")
         }
         guard let collect = XCTestDiagnosticCollectionMode(rawValue: collectRaw) else {
@@ -186,9 +186,13 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return CodeCoverageSettings()
         }
-        guard let enabled = reader.bool("enabled") else {
-            throw XCStewardError.invalidConfiguration("Profile \(profileName) coverage.enabled is required when [coverage] is present")
-        }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "coverage",
+            reader: reader,
+            allowedKeys: ["enabled"]
+        )
+        let enabled = try requiredBool(profileName: profileName, section: "coverage", key: "enabled", reader: reader)
         return CodeCoverageSettings(enabled: enabled)
     }
 
@@ -196,9 +200,13 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return ResultStreamSettings()
         }
-        guard let enabled = reader.bool("enabled") else {
-            throw XCStewardError.invalidConfiguration("Profile \(profileName) result_stream.enabled is required when [result_stream] is present")
-        }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "result_stream",
+            reader: reader,
+            allowedKeys: ["enabled"]
+        )
+        let enabled = try requiredBool(profileName: profileName, section: "result_stream", key: "enabled", reader: reader)
         return ResultStreamSettings(enabled: enabled)
     }
 
@@ -206,9 +214,13 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return ResultBundleSettings()
         }
-        guard let version = reader.integer("version") else {
-            throw XCStewardError.invalidConfiguration("Profile \(profileName) result_bundle.version is required when [result_bundle] is present")
-        }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "result_bundle",
+            reader: reader,
+            allowedKeys: ["version"]
+        )
+        let version = try requiredInteger(profileName: profileName, section: "result_bundle", key: "version", reader: reader)
         guard version >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) result_bundle.version must be >= 1")
         }
@@ -216,8 +228,17 @@ enum ProfileSectionDecoders {
     }
 
     static func testProducts(profileName: String, reader: TOMLSectionReader) throws -> TestProductsSettings {
-        let enabled = reader.bool("enabled") ?? false
-        let useForTesting = reader.bool("use_for_testing") ?? false
+        guard !reader.isEmpty else {
+            return TestProductsSettings()
+        }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "test_products",
+            reader: reader,
+            allowedKeys: ["enabled", "use_for_testing"]
+        )
+        let enabled = try optionalBool(profileName: profileName, section: "test_products", key: "enabled", reader: reader) ?? false
+        let useForTesting = try optionalBool(profileName: profileName, section: "test_products", key: "use_for_testing", reader: reader) ?? false
         if useForTesting && !enabled {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) test_products.use_for_testing requires enabled = true")
         }
@@ -228,22 +249,28 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return SimulatorPrivacySettings()
         }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "privacy",
+            reader: reader,
+            allowedKeys: ["grant", "reset", "revoke"]
+        )
         var permissions: [SimulatorPrivacyPermission] = []
-        for entry in reader.array("grant") {
+        for entry in try stringArray(profileName: profileName, section: "privacy", key: "grant", reader: reader) {
             permissions.append(try simulatorPrivacyPermission(
                 profileName: profileName,
                 action: .grant,
                 rawEntry: entry
             ))
         }
-        for entry in reader.array("revoke") {
+        for entry in try stringArray(profileName: profileName, section: "privacy", key: "revoke", reader: reader) {
             permissions.append(try simulatorPrivacyPermission(
                 profileName: profileName,
                 action: .revoke,
                 rawEntry: entry
             ))
         }
-        for entry in reader.array("reset") {
+        for entry in try stringArray(profileName: profileName, section: "privacy", key: "reset", reader: reader) {
             permissions.append(try simulatorPrivacyPermission(
                 profileName: profileName,
                 action: .reset,
@@ -253,12 +280,28 @@ enum ProfileSectionDecoders {
         return SimulatorPrivacySettings(permissions: permissions)
     }
 
-    static func managedSimulator(reader: TOMLSectionReader) -> ManagedSimulator? {
-        guard let managedName = reader.string("name"),
-              let deviceType = reader.string("device_type"),
-              let runtime = reader.string("runtime") else {
+    static func managedSimulator(profileName: String, reader: TOMLSectionReader) throws -> ManagedSimulator? {
+        guard !reader.isEmpty else {
             return nil
         }
+        let managedName = try requiredTrimmedString(
+            profileName: profileName,
+            section: "managed_simulator",
+            key: "name",
+            reader: reader
+        )
+        let deviceType = try requiredTrimmedString(
+            profileName: profileName,
+            section: "managed_simulator",
+            key: "device_type",
+            reader: reader
+        )
+        let runtime = try requiredTrimmedString(
+            profileName: profileName,
+            section: "managed_simulator",
+            key: "runtime",
+            reader: reader
+        )
         return ManagedSimulator(
             name: managedName,
             deviceType: deviceType,
@@ -267,20 +310,32 @@ enum ProfileSectionDecoders {
         )
     }
 
-    static func env(reader: TOMLSectionReader) -> [String: String] {
-        reader.stringMap()
+    static func env(profileName: String, reader: TOMLSectionReader) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for key in reader.values.keys.sorted() {
+            guard case let .string(value) = reader.values[key] else {
+                throw XCStewardError.invalidConfiguration("Profile \(profileName) env.\(key) must be a string")
+            }
+            result[key] = value
+        }
+        return result
     }
 
-    static func timeouts(reader: TOMLSectionReader) -> Timeouts {
-        Timeouts(
-            boot: TimeInterval(reader.integer("boot") ?? 30),
-            build: TimeInterval(reader.integer("build") ?? 600),
-            test: TimeInterval(reader.integer("test") ?? 600)
+    static func timeouts(profileName: String, reader: TOMLSectionReader) throws -> Timeouts {
+        try Timeouts(
+            boot: positiveTimeout(profileName: profileName, key: "boot", value: reader.integer("boot") ?? 30),
+            build: positiveTimeout(profileName: profileName, key: "build", value: reader.integer("build") ?? 600),
+            test: positiveTimeout(profileName: profileName, key: "test", value: reader.integer("test") ?? 600)
         )
     }
 
     static func resetPolicy(profileName: String, root: TOMLSectionReader) throws -> String? {
-        let resetPolicy = root.string("reset_policy")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let resetPolicy = try optionalEnumString(
+            profileName: profileName,
+            keyPath: "reset_policy",
+            reader: root,
+            key: "reset_policy"
+        )
         if let resetPolicy, !["none", "shutdown", "erase"].contains(resetPolicy) {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) has unsupported reset_policy '\(resetPolicy)'")
         }
@@ -298,7 +353,7 @@ enum ProfileSectionDecoders {
         guard parts.count == 1 || parts.count == 2 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) privacy.\(action.rawValue) entry must be 'service' or 'service:bundle.identifier'")
         }
-        let service = parts[0]
+        let service = parts[0].lowercased()
         guard supportedSimulatorPrivacyServices.contains(service) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) privacy.\(action.rawValue) has unsupported service '\(service)'")
         }
@@ -314,6 +369,114 @@ enum ProfileSectionDecoders {
             }
         }
         return SimulatorPrivacyPermission(action: action, service: service, bundleIdentifier: bundleIdentifier)
+    }
+
+    private static func requiredTrimmedString(
+        profileName: String,
+        section: String,
+        key: String,
+        reader: TOMLSectionReader
+    ) throws -> String {
+        guard let value = reader.string(key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be a non-empty string")
+        }
+        return value
+    }
+
+    private static func requiredBool(
+        profileName: String,
+        section: String,
+        key: String,
+        reader: TOMLSectionReader
+    ) throws -> Bool {
+        guard let value = reader.values[key] else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) is required when [\(section)] is present")
+        }
+        guard case let .bool(boolean) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be a boolean")
+        }
+        return boolean
+    }
+
+    private static func optionalBool(
+        profileName: String,
+        section: String,
+        key: String,
+        reader: TOMLSectionReader
+    ) throws -> Bool? {
+        guard let value = reader.values[key] else {
+            return nil
+        }
+        guard case let .bool(boolean) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be a boolean")
+        }
+        return boolean
+    }
+
+    private static func requiredInteger(
+        profileName: String,
+        section: String,
+        key: String,
+        reader: TOMLSectionReader
+    ) throws -> Int {
+        guard let value = reader.values[key] else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) is required when [\(section)] is present")
+        }
+        guard case let .integer(number) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be an integer")
+        }
+        return number
+    }
+
+    private static func validateKnownKeys(
+        profileName: String,
+        section: String,
+        reader: TOMLSectionReader,
+        allowedKeys: Set<String>
+    ) throws {
+        let unsupported = reader.values.keys.filter { !allowedKeys.contains($0) }.sorted()
+        guard unsupported.isEmpty else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) [\(section)] has unsupported key '\(unsupported[0])'")
+        }
+    }
+
+    private static func stringArray(
+        profileName: String,
+        section: String,
+        key: String,
+        reader: TOMLSectionReader
+    ) throws -> [String] {
+        guard let value = reader.values[key] else {
+            return []
+        }
+        guard case let .array(values) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be an array of strings")
+        }
+        return values
+    }
+
+    private static func positiveTimeout(profileName: String, key: String, value: Int) throws -> TimeInterval {
+        guard value >= 1 else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) timeouts.\(key) must be >= 1")
+        }
+        return TimeInterval(value)
+    }
+
+    private static func optionalEnumString(
+        profileName: String,
+        keyPath: String,
+        reader: TOMLSectionReader,
+        key: String
+    ) throws -> String? {
+        guard let raw = reader.string(key) else {
+            return nil
+        }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(keyPath) must be a non-empty string")
+        }
+        return value
     }
 
     private static let supportedSimulatorPrivacyServices: Set<String> = [

@@ -28,10 +28,19 @@ public struct ProfileLoader {
     private func materializeProfile(name: String, raw: [String: [String: TOMLValue]]) throws -> ProjectProfile {
         let reader = TOMLProfileReader(raw: raw)
         let root = reader.root
-        guard let repoRoot = root.string("repo_root"),
-              let scheme = root.string("scheme") else {
+        guard root.string("repo_root") != nil,
+              root.string("scheme") != nil else {
             throw XCStewardError.invalidConfiguration("Profile \(name) is missing repo_root or scheme")
         }
+        let repoRoot = try requiredRootString("repo_root", profileName: name, root: root)
+        let scheme = try requiredRootString("scheme", profileName: name, root: root)
+        let projectPath = optionalRootString("project_path", root: root)
+        let workspacePath = optionalRootString("workspace_path", root: root)
+        try validateBuildContainer(
+            profileName: name,
+            projectPath: projectPath,
+            workspacePath: workspacePath
+        )
         let parallel = try ProfileSectionDecoders.parallel(
             profileName: name,
             reader: reader.section("parallel")
@@ -77,20 +86,29 @@ public struct ProfileLoader {
             profileName: name,
             reader: reader.section("privacy")
         )
-        let managedSimulator = ProfileSectionDecoders.managedSimulator(reader: reader.section("managed_simulator"))
-        let envValues = ProfileSectionDecoders.env(reader: reader.section("env"))
-        let timeouts = ProfileSectionDecoders.timeouts(reader: reader.section("timeouts"))
+        let managedSimulator = try ProfileSectionDecoders.managedSimulator(
+            profileName: name,
+            reader: reader.section("managed_simulator")
+        )
+        let envValues = try ProfileSectionDecoders.env(
+            profileName: name,
+            reader: reader.section("env")
+        )
+        let timeouts = try ProfileSectionDecoders.timeouts(
+            profileName: name,
+            reader: reader.section("timeouts")
+        )
         let resetPolicy = try ProfileSectionDecoders.resetPolicy(profileName: name, root: root)
         return ProjectProfile(
             name: name,
             repoRoot: repoRoot,
-            projectPath: root.string("project_path"),
-            workspacePath: root.string("workspace_path"),
+            projectPath: projectPath,
+            workspacePath: workspacePath,
             scheme: scheme,
-            defaultSimulatorID: root.string("default_simulator_id"),
+            defaultSimulatorID: optionalRootString("default_simulator_id", root: root),
             managedSimulator: managedSimulator,
-            defaultTestPlan: root.string("default_test_plan"),
-            allowedSimulatorIDs: root.array("allowed_simulator_ids"),
+            defaultTestPlan: optionalRootString("default_test_plan", root: root),
+            allowedSimulatorIDs: trimmedRootArray("allowed_simulator_ids", root: root),
             env: envValues,
             timeouts: timeouts,
             resetPolicy: resetPolicy,
@@ -106,6 +124,46 @@ public struct ProfileLoader {
             testProducts: testProducts,
             privacy: privacy
         )
+    }
+
+    private func requiredRootString(
+        _ key: String,
+        profileName: String,
+        root: TOMLSectionReader
+    ) throws -> String {
+        guard let value = optionalRootString(key, root: root) else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(key) must be a non-empty string")
+        }
+        return value
+    }
+
+    private func optionalRootString(_ key: String, root: TOMLSectionReader) -> String? {
+        guard let value = root.string(key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func validateBuildContainer(
+        profileName: String,
+        projectPath: String?,
+        workspacePath: String?
+    ) throws {
+        switch (projectPath, workspacePath) {
+        case (nil, nil):
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) must set exactly one of project_path or workspace_path")
+        case (.some, .some):
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) must not set both project_path and workspace_path")
+        default:
+            return
+        }
+    }
+
+    private func trimmedRootArray(_ key: String, root: TOMLSectionReader) -> [String] {
+        root.array(key)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     func parseTOML(_ text: String) throws -> [String: [String: TOMLValue]] {
