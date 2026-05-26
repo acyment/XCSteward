@@ -7,6 +7,12 @@ struct CLIResult {
     let stderr: String
 }
 
+struct RunningCLIProcess {
+    let process: Process
+    let stdout: Pipe
+    let stderr: Pipe
+}
+
 enum TestSupportError: Error {
     case executableNotFound
 }
@@ -24,16 +30,7 @@ func executableURL() throws -> URL {
     try productsDirectory().appendingPathComponent("xcsteward")
 }
 
-@discardableResult
-func runCLI(
-    arguments: [String],
-    environment: [String: String] = [:],
-    currentDirectoryURL: URL? = nil
-) throws -> CLIResult {
-    let process = Process()
-    process.executableURL = try executableURL()
-    process.arguments = arguments
-    process.currentDirectoryURL = currentDirectoryURL
+private func mergedCLIEnvironment(_ environment: [String: String]) -> [String: String] {
     var mergedEnvironment = ProcessInfo.processInfo.environment
     mergedEnvironment["XCSTEWARD_DOCTOR_MIN_FREE_BYTES"] = "0"
     mergedEnvironment["XCSTEWARD_DOCTOR_WARN_FREE_BYTES"] = "0"
@@ -41,7 +38,32 @@ func runCLI(
     for (key, value) in environment {
         mergedEnvironment[key] = value
     }
-    process.environment = mergedEnvironment
+    return mergedEnvironment
+}
+
+@discardableResult
+func runCLI(
+    arguments: [String],
+    environment: [String: String] = [:],
+    currentDirectoryURL: URL? = nil
+) throws -> CLIResult {
+    finishCLI(try startCLI(
+        arguments: arguments,
+        environment: environment,
+        currentDirectoryURL: currentDirectoryURL
+    ))
+}
+
+func startCLI(
+    arguments: [String],
+    environment: [String: String] = [:],
+    currentDirectoryURL: URL? = nil
+) throws -> RunningCLIProcess {
+    let process = Process()
+    process.executableURL = try executableURL()
+    process.arguments = arguments
+    process.currentDirectoryURL = currentDirectoryURL
+    process.environment = mergedCLIEnvironment(environment)
 
     let stdout = Pipe()
     let stderr = Pipe()
@@ -49,24 +71,71 @@ func runCLI(
     process.standardError = stderr
 
     try process.run()
-    process.waitUntilExit()
+    return RunningCLIProcess(process: process, stdout: stdout, stderr: stderr)
+}
 
-    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+@discardableResult
+func runCLIThroughPATH(
+    arguments: [String],
+    environment: [String: String] = [:],
+    currentDirectoryURL: URL? = nil
+) throws -> CLIResult {
+    finishCLI(try startCLIThroughPATH(
+        arguments: arguments,
+        environment: environment,
+        currentDirectoryURL: currentDirectoryURL
+    ))
+}
+
+func startCLIThroughPATH(
+    arguments: [String],
+    environment: [String: String] = [:],
+    currentDirectoryURL: URL? = nil
+) throws -> RunningCLIProcess {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["xcsteward"] + arguments
+    process.currentDirectoryURL = currentDirectoryURL
+    process.environment = mergedCLIEnvironment(environment)
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    return RunningCLIProcess(process: process, stdout: stdout, stderr: stderr)
+}
+
+func finishCLI(_ running: RunningCLIProcess) -> CLIResult {
+    running.process.waitUntilExit()
+
+    let stdoutData = running.stdout.fileHandleForReading.readDataToEndOfFile()
+    let stderrData = running.stderr.fileHandleForReading.readDataToEndOfFile()
     return CLIResult(
-        status: process.terminationStatus,
+        status: running.process.terminationStatus,
         stdout: String(data: stdoutData, encoding: .utf8) ?? "",
         stderr: String(data: stderrData, encoding: .utf8) ?? ""
     )
 }
 
 func makeTempDirectory(function: String = #function) throws -> URL {
+    try makeTempDirectory(function: function, trackForCleanup: true)
+}
+
+func makeUntrackedTempDirectory(function: String = #function) throws -> URL {
+    try makeTempDirectory(function: function, trackForCleanup: false)
+}
+
+private func makeTempDirectory(function: String, trackForCleanup: Bool) throws -> URL {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("XCStewardTests")
         .appendingPathComponent(UUID().uuidString)
         .appendingPathComponent(function)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    TestTempDirectoryTracker.shared.track(root)
+    if trackForCleanup {
+        TestTempDirectoryTracker.shared.track(root)
+    }
     return root
 }
 

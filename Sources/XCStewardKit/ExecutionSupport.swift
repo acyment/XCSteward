@@ -4,11 +4,67 @@ struct ToolExecutionContext {
     let profile: ProjectProfile
     let jobID: String
     let store: StateStore
+    var commandLog: URL? = nil
+    var commandEventLog: URL? = nil
 }
 
 struct TestOutcome: Sendable {
     var resultClass: ResultClass
     var exitCode: Int32?
+}
+
+struct RunCommandRecord: Codable, Sendable {
+    var tool: String
+    var arguments: [String]
+    var commandLine: String
+    var workingDirectory: String?
+    var timeoutSeconds: Double
+    var phase: String?
+    var exitCode: Int32?
+    var timedOut: Bool
+    var error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tool
+        case arguments
+        case commandLine = "command_line"
+        case workingDirectory = "working_directory"
+        case timeoutSeconds = "timeout_seconds"
+        case phase
+        case exitCode = "exit_code"
+        case timedOut = "timed_out"
+        case error
+    }
+}
+
+struct RunCommandEvent: Codable, Sendable {
+    var event: String
+    var timestamp: Double
+    var tool: String
+    var arguments: [String]
+    var commandLine: String
+    var workingDirectory: String?
+    var timeoutSeconds: Double
+    var phase: String?
+    var pid: Int32?
+    var exitCode: Int32?
+    var timedOut: Bool?
+    var error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case event
+        case timestamp
+        case tool
+        case arguments
+        case commandLine = "command_line"
+        case workingDirectory = "working_directory"
+        case timeoutSeconds = "timeout_seconds"
+        case phase
+        case pid
+        case exitCode = "exit_code"
+        case timedOut = "timed_out"
+        case error
+    }
 }
 
 struct AttemptArtifact: Codable, Sendable {
@@ -40,6 +96,25 @@ struct AttemptArtifactPaths: Sendable {
     var resultBundle: URL
     var resultStream: URL
     var metadata: URL
+}
+
+struct RetryAttemptEvidence: Sendable {
+    var retryReason: String
+    var artifact: AttemptArtifact
+    var simulatorDiagnostic: String?
+}
+
+struct XcodebuildTestAttempt: Sendable {
+    var arguments: [String]
+    var simulatorID: String
+    var resultStream: URL
+    var logURL: URL
+    var combinedLog: URL
+    var temporaryDirectory: URL
+    var phase: String
+    var shardID: String?
+    var shardIndex: Int?
+    var totalShards: Int?
 }
 
 struct ShardReport: Codable, Sendable {
@@ -143,6 +218,8 @@ struct ExecutionPaths {
     let simulatorDiagnostics: URL
     let junitReport: URL
     let runMetadata: URL
+    let commandLog: URL
+    let commandEventLog: URL
     let xcodebuildHelp: URL
 
     init(job: JobRecord) {
@@ -167,6 +244,8 @@ struct ExecutionPaths {
         self.simulatorDiagnostics = artifactsRoot.appendingPathComponent("simctl-diagnose.log")
         self.junitReport = artifactsRoot.appendingPathComponent("junit.xml")
         self.runMetadata = artifactsRoot.appendingPathComponent("run-metadata.json")
+        self.commandLog = artifactsRoot.appendingPathComponent("commands.jsonl")
+        self.commandEventLog = artifactsRoot.appendingPathComponent("command-events.jsonl")
         self.xcodebuildHelp = artifactsRoot.appendingPathComponent("xcodebuild-help.txt")
     }
 
@@ -208,7 +287,8 @@ struct ExecutionPaths {
             testLog: testLog.path,
             derivedData: derivedData.path,
             diagnostics: fileSystem.fileExists(simulatorDiagnostics) ? simulatorDiagnostics.path : nil,
-            junit: fileSystem.fileExists(junitReport) ? junitReport.path : nil
+            junit: fileSystem.isRegularFile(junitReport) ? junitReport.path : nil,
+            commandEvents: fileSystem.fileExists(commandEventLog) ? commandEventLog.path : nil
         )
     }
 
@@ -220,7 +300,8 @@ struct ExecutionPaths {
             testLog: testLog.path,
             derivedData: derivedData.path,
             diagnostics: nil,
-            junit: nil
+            junit: nil,
+            commandEvents: commandEventLog.path
         )
     }
 
@@ -234,7 +315,8 @@ struct ExecutionPaths {
             diagnostics: fileSystem.fileExists(combinedSummary)
                 ? combinedSummary.path
                 : (fileSystem.fileExists(shardsManifest) ? shardsManifest.path : nil),
-            junit: fileSystem.fileExists(junitReport) ? junitReport.path : nil
+            junit: fileSystem.isRegularFile(junitReport) ? junitReport.path : nil,
+            commandEvents: fileSystem.fileExists(commandEventLog) ? commandEventLog.path : nil
         )
     }
 }
@@ -282,4 +364,36 @@ func preserveAttemptArtifacts(
     )
     try fileSystem.writeData(try jsonData(artifact), to: attemptPaths.metadata)
     return artifact
+}
+
+@discardableResult
+func recordRetryAttemptEvidence(
+    fileSystem: FileSystem,
+    sourceResultBundle: URL,
+    sourceResultStream: URL,
+    attemptPaths: AttemptArtifactPaths,
+    attempt: Int,
+    phase: String,
+    outcome: TestOutcome,
+    run: ToolResult,
+    captureSimulatorDiagnostic: () -> String?
+) throws -> RetryAttemptEvidence {
+    let retryReason = outcome.resultClass.rawValue
+    let artifact = try preserveAttemptArtifacts(
+        fileSystem: fileSystem,
+        sourceResultBundle: sourceResultBundle,
+        sourceResultStream: sourceResultStream,
+        attemptPaths: attemptPaths,
+        attempt: attempt,
+        phase: phase,
+        resultClass: outcome.resultClass,
+        exitCode: run.exitCode,
+        timedOut: run.timedOut,
+        retryReason: retryReason
+    )
+    return RetryAttemptEvidence(
+        retryReason: retryReason,
+        artifact: artifact,
+        simulatorDiagnostic: captureSimulatorDiagnostic()
+    )
 }

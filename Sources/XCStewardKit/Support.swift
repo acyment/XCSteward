@@ -53,6 +53,7 @@ public protocol FileSystem {
     func appendData(_ data: Data, to url: URL) throws
     func readData(from url: URL) throws -> Data
     func fileExists(_ url: URL) -> Bool
+    func isRegularFile(_ url: URL) -> Bool
     func removeItem(_ url: URL) throws
     func moveItem(_ source: URL, to destination: URL) throws
     func contentsOfDirectory(_ url: URL) throws -> [URL]
@@ -83,6 +84,13 @@ public struct LocalFileSystem: FileSystem {
     }
     public func fileExists(_ url: URL) -> Bool {
         manager.fileExists(atPath: url.path)
+    }
+    public func isRegularFile(_ url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            return false
+        }
+        return true
     }
     public func removeItem(_ url: URL) throws {
         if manager.fileExists(atPath: url.path) {
@@ -497,6 +505,7 @@ public enum XCStewardError: Error, CustomStringConvertible {
     case usage(String)
     case notFound(String)
     case invalidConfiguration(String)
+    case stateRootUnavailable(String)
     case commandFailed(String)
     case canceled(String)
 
@@ -505,6 +514,7 @@ public enum XCStewardError: Error, CustomStringConvertible {
         case let .usage(message),
              let .notFound(message),
              let .invalidConfiguration(message),
+             let .stateRootUnavailable(message),
              let .commandFailed(message),
              let .canceled(message):
             return message
@@ -531,15 +541,34 @@ public func decodeJSON<T: Decodable>(_ type: T.Type, from data: Data) throws -> 
 }
 
 public func isPIDAlive(_ pid: Int32) -> Bool {
-    if pid <= 0 { return false }
-    if kill(pid, 0) == 0 { return true }
-    return errno == EPERM
+    guard pid > 0 else {
+        return false
+    }
+    guard kill(pid, 0) == 0 || errno == EPERM else {
+        return false
+    }
+    return !isPIDZombie(pid)
 }
 
-public func resolveStateRoot(arguments: inout [String], environment: [String: String]) -> URL {
-    if let index = arguments.firstIndex(of: "--state-root"), arguments.indices.contains(index + 1) {
-        let path = arguments[index + 1]
-        arguments.removeSubrange(index...(index + 1))
+private func isPIDZombie(_ pid: Int32) -> Bool {
+    var info = proc_bsdinfo()
+    let size = MemoryLayout<proc_bsdinfo>.stride
+    let result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(size))
+    guard result == Int32(size) else {
+        return false
+    }
+    return info.pbi_status == SZOMB
+}
+
+public func resolveStateRoot(arguments: inout [String], environment: [String: String]) throws -> URL {
+    if let index = arguments.firstIndex(of: "--state-root") {
+        let valueIndex = index + 1
+        guard arguments.indices.contains(valueIndex),
+              !isOptionToken(arguments[valueIndex]) else {
+            throw XCStewardError.usage("Option --state-root requires a value")
+        }
+        let path = arguments[valueIndex]
+        arguments.removeSubrange(index...valueIndex)
         return URL(fileURLWithPath: path)
     }
     return defaultStateRoot(environment: environment)
@@ -553,11 +582,20 @@ public func removeFlag(_ flag: String, from arguments: inout [String]) -> Bool {
     return false
 }
 
-public func consumeOption(_ option: String, from arguments: inout [String]) -> String? {
-    guard let index = arguments.firstIndex(of: option), arguments.indices.contains(index + 1) else {
+public func consumeOption(_ option: String, from arguments: inout [String]) throws -> String? {
+    guard let index = arguments.firstIndex(of: option) else {
         return nil
     }
-    let value = arguments[index + 1]
-    arguments.removeSubrange(index...(index + 1))
+    let valueIndex = index + 1
+    guard arguments.indices.contains(valueIndex),
+          !isOptionToken(arguments[valueIndex]) else {
+        throw XCStewardError.usage("Option \(option) requires a value")
+    }
+    let value = arguments[valueIndex]
+    arguments.removeSubrange(index...valueIndex)
     return value
+}
+
+private func isOptionToken(_ argument: String) -> Bool {
+    argument.hasPrefix("--") || argument == "-h"
 }

@@ -5,7 +5,7 @@ scheme = "DemoApp"
 [managed_simulator]
 name = "XCSteward Demo iPhone"
 device_type = "iPhone 17 Pro"
-runtime = "iOS 26.4"
+runtime = "iOS 26.5"
 
 [parallel]
 mode = "xcode-managed"

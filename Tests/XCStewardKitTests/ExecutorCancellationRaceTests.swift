@@ -87,6 +87,16 @@ private final class BuildFailureCancelRaceToolRunner: ToolRunning {
         if tool == "ps" {
             return ToolResult(exitCode: 0, output: "  PID COMMAND\n", timedOut: false)
         }
+        if tool == "xcrun", arguments == ["--find", "xcodebuild"] {
+            return ToolResult(exitCode: 0, output: "/tmp/fake-xcodebuild\n", timedOut: false)
+        }
+        if tool == "xcrun", arguments == ["simctl", "list", "devices", "--json"] {
+            return ToolResult(
+                exitCode: 0,
+                output: #"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":true}]}}"#,
+                timedOut: false
+            )
+        }
         if tool == "xcrun", arguments.starts(with: ["simctl", "boot"]) || arguments.starts(with: ["simctl", "bootstatus"]) {
             return ToolResult(exitCode: 0, output: "", timedOut: false)
         }

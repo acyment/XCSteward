@@ -21,8 +21,10 @@ public enum JobState: String, Codable, Sendable {
 public enum ResultClass: String, Codable, Sendable {
     case success
     case buildFailure = "build_failure"
+    case buildTimeout = "build_timeout"
     case testFailure = "test_failure"
     case testTimeout = "test_timeout"
+    case unsupportedDestination = "unsupported_destination"
     case runnerBootstrapFailure = "runner_bootstrap_failure"
     case artifactFailure = "artifact_failure"
     case canceled
@@ -32,7 +34,7 @@ public enum ResultClass: String, Codable, Sendable {
         switch self {
         case .runnerBootstrapFailure, .artifactFailure:
             return true
-        case .success, .buildFailure, .testFailure, .testTimeout, .canceled, .internalError:
+        case .success, .buildFailure, .buildTimeout, .testFailure, .testTimeout, .unsupportedDestination, .canceled, .internalError:
             return false
         }
     }
@@ -325,6 +327,7 @@ public struct JobArtifacts: Codable, Sendable {
     public var derivedData: String?
     public var diagnostics: String?
     public var junit: String?
+    public var commandEvents: String?
 }
 
 public struct JobCounts: Codable, Sendable {
@@ -420,6 +423,28 @@ public struct DoctorCheck: Codable, Sendable {
     public var autoFixable: Bool
     public var fixed: Bool
     public var manualAction: String?
+    public var evidencePath: String?
+    public var failureExcerpt: String?
+
+    public init(
+        id: String,
+        status: DoctorStatus,
+        message: String,
+        autoFixable: Bool,
+        fixed: Bool,
+        manualAction: String?,
+        evidencePath: String? = nil,
+        failureExcerpt: String? = nil
+    ) {
+        self.id = id
+        self.status = status
+        self.message = message
+        self.autoFixable = autoFixable
+        self.fixed = fixed
+        self.manualAction = manualAction
+        self.evidencePath = evidencePath
+        self.failureExcerpt = failureExcerpt
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -428,6 +453,8 @@ public struct DoctorCheck: Codable, Sendable {
         case autoFixable = "auto_fixable"
         case fixed
         case manualAction = "manual_action"
+        case evidencePath = "evidence_path"
+        case failureExcerpt = "failure_excerpt"
     }
 }
 

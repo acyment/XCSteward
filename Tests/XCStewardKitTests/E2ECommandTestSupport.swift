@@ -96,7 +96,8 @@ struct E2EScenario {
         let matched = try waitUntil(timeout: timeout) {
             try (status(jobID)["state"] as? String)?.e2eIsTerminalJobState == true
         }
-        XCTAssertTrue(matched)
+        let log = try toolLog()
+        XCTAssertTrue(matched, log)
         return try status(jobID)
     }
 
@@ -108,7 +109,8 @@ struct E2EScenario {
         let matched = try waitUntil(timeout: timeout) {
             try toolEvents().filter(predicate).count == expectedCount
         }
-        XCTAssertTrue(matched)
+        let log = try toolLog()
+        XCTAssertTrue(matched, log)
     }
 
     func jobID(from json: [String: Any]) throws -> String {

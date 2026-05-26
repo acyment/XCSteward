@@ -51,6 +51,12 @@ struct TOMLSectionReader {
 
 enum ProfileSectionDecoders {
     static func parallel(profileName: String, reader: TOMLSectionReader) throws -> ParallelSettings {
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "parallel",
+            reader: reader,
+            allowedKeys: ["mode", "max_workers", "exact_workers", "shard_count"]
+        )
         let parallelModeRaw = try optionalEnumString(
             profileName: profileName,
             keyPath: "parallel.mode",
@@ -60,18 +66,33 @@ enum ProfileSectionDecoders {
         guard let parallelMode = ParallelMode(rawValue: parallelModeRaw) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) has unsupported parallel.mode '\(parallelModeRaw)'")
         }
-        let maxWorkers = reader.integer("max_workers") ?? 1
+        let maxWorkers = try optionalInteger(
+            profileName: profileName,
+            keyPath: "parallel.max_workers",
+            reader: reader,
+            key: "max_workers"
+        ) ?? 1
         guard maxWorkers >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) parallel.max_workers must be >= 1")
         }
-        let shardCount = reader.integer("shard_count") ?? 1
+        let shardCount = try optionalInteger(
+            profileName: profileName,
+            keyPath: "parallel.shard_count",
+            reader: reader,
+            key: "shard_count"
+        ) ?? 1
         guard shardCount >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) parallel.shard_count must be >= 1")
         }
         return ParallelSettings(
             mode: parallelMode,
             maxWorkers: maxWorkers,
-            exactWorkers: reader.bool("exact_workers") ?? false,
+            exactWorkers: try optionalBool(
+                profileName: profileName,
+                keyPath: "parallel.exact_workers",
+                reader: reader,
+                key: "exact_workers"
+            ) ?? false,
             shardCount: shardCount
         )
     }
@@ -84,11 +105,25 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return nil
         }
-        guard let base = reader.integer("base") else {
-            throw XCStewardError.invalidConfiguration("Profile \(profileName) ports.base is required when [ports] is present")
-        }
-        let count = reader.integer("count") ?? 16
-        let stride = reader.integer("stride") ?? 100
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "ports",
+            reader: reader,
+            allowedKeys: ["base", "count", "stride"]
+        )
+        let base = try requiredInteger(profileName: profileName, section: "ports", key: "base", reader: reader)
+        let count = try optionalInteger(
+            profileName: profileName,
+            keyPath: "ports.count",
+            reader: reader,
+            key: "count"
+        ) ?? 16
+        let stride = try optionalInteger(
+            profileName: profileName,
+            keyPath: "ports.stride",
+            reader: reader,
+            key: "stride"
+        ) ?? 100
         guard (1...65535).contains(base) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) ports.base must be between 1 and 65535")
         }
@@ -107,9 +142,30 @@ enum ProfileSectionDecoders {
     }
 
     static func xctestTimeouts(profileName: String, reader: TOMLSectionReader) throws -> XCTestTimeoutSettings {
-        let enabled = reader.bool("enabled") ?? true
-        let defaultAllowance = reader.integer("default_execution_time_allowance") ?? 120
-        let maximumAllowance = reader.integer("maximum_execution_time_allowance") ?? 600
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "test_timeouts",
+            reader: reader,
+            allowedKeys: ["enabled", "default_execution_time_allowance", "maximum_execution_time_allowance"]
+        )
+        let enabled = try optionalBool(
+            profileName: profileName,
+            keyPath: "test_timeouts.enabled",
+            reader: reader,
+            key: "enabled"
+        ) ?? true
+        let defaultAllowance = try optionalInteger(
+            profileName: profileName,
+            keyPath: "test_timeouts.default_execution_time_allowance",
+            reader: reader,
+            key: "default_execution_time_allowance"
+        ) ?? 120
+        let maximumAllowance = try optionalInteger(
+            profileName: profileName,
+            keyPath: "test_timeouts.maximum_execution_time_allowance",
+            reader: reader,
+            key: "maximum_execution_time_allowance"
+        ) ?? 600
         guard defaultAllowance >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) test_timeouts.default_execution_time_allowance must be >= 1")
         }
@@ -127,11 +183,42 @@ enum ProfileSectionDecoders {
     }
 
     static func xctestRetries(profileName: String, reader: TOMLSectionReader) throws -> XCTestRetrySettings {
-        let enabled = reader.bool("enabled") ?? false
-        let iterations = reader.integer("iterations") ?? 1
-        let retryTestsOnFailure = reader.bool("retry_tests_on_failure") ?? true
-        let runTestsUntilFailure = reader.bool("run_tests_until_failure") ?? false
-        let relaunchBetweenIterations = reader.bool("relaunch_between_iterations")
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "test_retries",
+            reader: reader,
+            allowedKeys: ["enabled", "iterations", "retry_tests_on_failure", "run_tests_until_failure", "relaunch_between_iterations"]
+        )
+        let enabled = try optionalBool(
+            profileName: profileName,
+            keyPath: "test_retries.enabled",
+            reader: reader,
+            key: "enabled"
+        ) ?? false
+        let iterations = try optionalInteger(
+            profileName: profileName,
+            keyPath: "test_retries.iterations",
+            reader: reader,
+            key: "iterations"
+        ) ?? 1
+        let retryTestsOnFailure = try optionalBool(
+            profileName: profileName,
+            keyPath: "test_retries.retry_tests_on_failure",
+            reader: reader,
+            key: "retry_tests_on_failure"
+        ) ?? true
+        let runTestsUntilFailure = try optionalBool(
+            profileName: profileName,
+            keyPath: "test_retries.run_tests_until_failure",
+            reader: reader,
+            key: "run_tests_until_failure"
+        ) ?? false
+        let relaunchBetweenIterations = try optionalBool(
+            profileName: profileName,
+            keyPath: "test_retries.relaunch_between_iterations",
+            reader: reader,
+            key: "relaunch_between_iterations"
+        )
         guard iterations >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) test_retries.iterations must be >= 1")
         }
@@ -158,6 +245,12 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return XCTestDiagnosticSettings()
         }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "test_diagnostics",
+            reader: reader,
+            allowedKeys: ["collect"]
+        )
         guard let collectRaw = try optionalEnumString(
             profileName: profileName,
             keyPath: "test_diagnostics.collect",
@@ -173,7 +266,18 @@ enum ProfileSectionDecoders {
     }
 
     static func destination(profileName: String, reader: TOMLSectionReader) throws -> XcodeDestinationSettings {
-        guard let timeout = reader.integer("timeout") else {
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "destination",
+            reader: reader,
+            allowedKeys: ["timeout"]
+        )
+        guard let timeout = try optionalInteger(
+            profileName: profileName,
+            keyPath: "destination.timeout",
+            reader: reader,
+            key: "timeout"
+        ) else {
             return XcodeDestinationSettings()
         }
         guard timeout >= 1 else {
@@ -284,6 +388,12 @@ enum ProfileSectionDecoders {
         guard !reader.isEmpty else {
             return nil
         }
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "managed_simulator",
+            reader: reader,
+            allowedKeys: ["name", "device_type", "runtime", "clone_for_shards"]
+        )
         let managedName = try requiredTrimmedString(
             profileName: profileName,
             section: "managed_simulator",
@@ -306,7 +416,12 @@ enum ProfileSectionDecoders {
             name: managedName,
             deviceType: deviceType,
             runtime: runtime,
-            cloneForShards: reader.bool("clone_for_shards") ?? false
+            cloneForShards: try optionalBool(
+                profileName: profileName,
+                keyPath: "managed_simulator.clone_for_shards",
+                reader: reader,
+                key: "clone_for_shards"
+            ) ?? false
         )
     }
 
@@ -322,10 +437,28 @@ enum ProfileSectionDecoders {
     }
 
     static func timeouts(profileName: String, reader: TOMLSectionReader) throws -> Timeouts {
-        try Timeouts(
-            boot: positiveTimeout(profileName: profileName, key: "boot", value: reader.integer("boot") ?? 30),
-            build: positiveTimeout(profileName: profileName, key: "build", value: reader.integer("build") ?? 600),
-            test: positiveTimeout(profileName: profileName, key: "test", value: reader.integer("test") ?? 600)
+        try validateKnownKeys(
+            profileName: profileName,
+            section: "timeouts",
+            reader: reader,
+            allowedKeys: ["boot", "build", "test"]
+        )
+        return try Timeouts(
+            boot: positiveTimeout(
+                profileName: profileName,
+                key: "boot",
+                value: try optionalInteger(profileName: profileName, keyPath: "timeouts.boot", reader: reader, key: "boot") ?? 30
+            ),
+            build: positiveTimeout(
+                profileName: profileName,
+                key: "build",
+                value: try optionalInteger(profileName: profileName, keyPath: "timeouts.build", reader: reader, key: "build") ?? 600
+            ),
+            test: positiveTimeout(
+                profileName: profileName,
+                key: "test",
+                value: try optionalInteger(profileName: profileName, keyPath: "timeouts.test", reader: reader, key: "test") ?? 600
+            )
         )
     }
 
@@ -377,7 +510,12 @@ enum ProfileSectionDecoders {
         key: String,
         reader: TOMLSectionReader
     ) throws -> String {
-        guard let value = reader.string(key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let value = try optionalString(
+            profileName: profileName,
+            keyPath: "\(section).\(key)",
+            reader: reader,
+            key: key
+        )?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) \(section).\(key) must be a non-empty string")
         }
@@ -456,6 +594,51 @@ enum ProfileSectionDecoders {
         return values
     }
 
+    private static func optionalString(
+        profileName: String,
+        keyPath: String,
+        reader: TOMLSectionReader,
+        key: String
+    ) throws -> String? {
+        guard let value = reader.values[key] else {
+            return nil
+        }
+        guard case let .string(string) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(keyPath) must be a string")
+        }
+        return string
+    }
+
+    private static func optionalInteger(
+        profileName: String,
+        keyPath: String,
+        reader: TOMLSectionReader,
+        key: String
+    ) throws -> Int? {
+        guard let value = reader.values[key] else {
+            return nil
+        }
+        guard case let .integer(number) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(keyPath) must be an integer")
+        }
+        return number
+    }
+
+    private static func optionalBool(
+        profileName: String,
+        keyPath: String,
+        reader: TOMLSectionReader,
+        key: String
+    ) throws -> Bool? {
+        guard let value = reader.values[key] else {
+            return nil
+        }
+        guard case let .bool(boolean) = value else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(keyPath) must be a boolean")
+        }
+        return boolean
+    }
+
     private static func positiveTimeout(profileName: String, key: String, value: Int) throws -> TimeInterval {
         guard value >= 1 else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) timeouts.\(key) must be >= 1")
@@ -469,7 +652,12 @@ enum ProfileSectionDecoders {
         reader: TOMLSectionReader,
         key: String
     ) throws -> String? {
-        guard let raw = reader.string(key) else {
+        guard let raw = try optionalString(
+            profileName: profileName,
+            keyPath: keyPath,
+            reader: reader,
+            key: key
+        ) else {
             return nil
         }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

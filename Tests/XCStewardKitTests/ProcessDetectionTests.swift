@@ -28,6 +28,28 @@ final class ProcessDetectionTests: XCTestCase {
         ))
     }
 
+    func testExecutorIgnoresQuotedOptionValuesContainingActionWords() {
+        XCTAssertFalse(RunnerProcessDetector.isCompeting(
+            command: #"xcodebuild -scheme "UITests test" -project Demo.xcodeproj -list"#,
+            policy: .executor
+        ))
+        XCTAssertFalse(RunnerProcessDetector.isCompeting(
+            command: #"xcodebuild -derivedDataPath "/tmp/build-for-testing output" -showBuildSettings"#,
+            policy: .executor
+        ))
+    }
+
+    func testExecutorHandlesQuotedAndEscapedExecutablePaths() {
+        XCTAssertTrue(RunnerProcessDetector.isCompeting(
+            command: #""/Applications/Xcode 16.app/Contents/Developer/usr/bin/xcodebuild" -scheme Demo test"#,
+            policy: .executor
+        ))
+        XCTAssertTrue(RunnerProcessDetector.isCompeting(
+            command: #"/Applications/Xcode\ 16.app/Contents/Developer/usr/bin/xcodebuild -scheme Demo test"#,
+            policy: .executor
+        ))
+    }
+
     func testDoctorStillTreatsAnyXcodebuildOrSimctlAsCompeting() {
         XCTAssertTrue(RunnerProcessDetector.isCompeting(
             command: "xcodebuild -scheme test -list",

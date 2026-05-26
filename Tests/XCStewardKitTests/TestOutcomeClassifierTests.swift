@@ -33,6 +33,23 @@ final class TestOutcomeClassifierTests: XCTestCase {
         )
     }
 
+    func testTimeoutAfterTestingStartedIsNotRunnerBootstrapFailure() {
+        let resultBundle = URL(fileURLWithPath: "/tmp/result.xcresult")
+
+        let outcome = classifier(bundleExists: true).classify(
+            run: toolResult(
+                output: """
+                Testing started
+                Lost connection to testmanagerd
+                """,
+                timedOut: true
+            ),
+            resultBundle: resultBundle
+        )
+
+        XCTAssertEqual(outcome.resultClass, .testTimeout)
+    }
+
     func testConfigurationFailuresAreRunnerBootstrapFailures() {
         let outcome = classifier(bundleExists: true).classify(
             run: toolResult(
@@ -59,6 +76,22 @@ final class TestOutcomeClassifierTests: XCTestCase {
         XCTAssertEqual(outcome.exitCode, 70)
     }
 
+    func testConfigurationPhraseAfterTestingStartedIsTestFailureWhenBundleExists() {
+        let outcome = classifier(bundleExists: true).classify(
+            run: toolResult(
+                exitCode: 65,
+                output: """
+                Test Suite 'DemoTests.xctest' started at 2026-05-23.
+                Assertion failed: Unable to find a device matching the provided destination specifier
+                """
+            ),
+            resultBundle: URL(fileURLWithPath: "/tmp/result.xcresult")
+        )
+
+        XCTAssertEqual(outcome.resultClass, .testFailure)
+        XCTAssertEqual(outcome.exitCode, 65)
+    }
+
     func testNonzeroRunWithoutResultBundleIsArtifactFailure() {
         let outcome = classifier(bundleExists: false).classify(
             run: toolResult(exitCode: 65, output: "xcodebuild failed"),
@@ -82,6 +115,10 @@ final class TestOutcomeClassifierTests: XCTestCase {
 
         XCTAssertTrue(classifier.shouldRetryBootstrapFailure(run: toolResult(output: "Lost connection to testmanagerd")))
         XCTAssertTrue(classifier.shouldRetryBootstrapFailure(run: toolResult(output: "lost connection to TestManagerD")))
+        XCTAssertFalse(classifier.shouldRetryBootstrapFailure(run: toolResult(output: """
+        Test Case '-[DemoTests testLogsBootstrapText]' started.
+        Lost connection to testmanagerd
+        """)))
         XCTAssertFalse(classifier.shouldRetryBootstrapFailure(run: toolResult(output: "There are no test bundles available to test.")))
         XCTAssertFalse(classifier.shouldRetryBootstrapFailure(run: toolResult(output: "Failing test assertion")))
     }

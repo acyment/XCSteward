@@ -165,7 +165,7 @@ struct ManualShardPlanner: Sendable {
         if resultClasses.contains(.canceled) {
             return .canceled
         }
-        for resultClass in [ResultClass.buildFailure, .runnerBootstrapFailure, .artifactFailure, .testTimeout, .testFailure, .internalError] {
+        for resultClass in [ResultClass.buildTimeout, .buildFailure, .unsupportedDestination, .runnerBootstrapFailure, .artifactFailure, .testTimeout, .testFailure, .internalError] {
             if resultClasses.contains(resultClass) {
                 return resultClass
             }

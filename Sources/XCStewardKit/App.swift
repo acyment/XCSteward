@@ -1,4 +1,14 @@
+import Darwin
 import Foundation
+
+private typealias CLICommandHandler = (inout XCStewardApp, [String], StateStore) throws -> Int32
+
+private struct CLICommandDefinition {
+    var name: String
+    var rootHelpLine: String?
+    var help: (String) -> String
+    var handler: CLICommandHandler
+}
 
 public struct XCStewardApp {
     private var environment: AppEnvironment
@@ -11,7 +21,7 @@ public struct XCStewardApp {
         var arguments = inputArguments
         let executableName = URL(fileURLWithPath: arguments.first ?? "xcsteward").lastPathComponent
         _ = arguments.first.map { _ in arguments.removeFirst() }
-        let stateRoot = resolveStateRoot(arguments: &arguments, environment: environment.processInfo.environment)
+        let stateRoot = try resolveStateRoot(arguments: &arguments, environment: environment.processInfo.environment)
         environment.paths = AppPaths(stateRoot: stateRoot)
 
         guard let command = arguments.first else {
@@ -35,32 +45,14 @@ public struct XCStewardApp {
             return 0
         }
 
-        switch command {
-        case "submit":
-            return try handleSubmit(arguments: arguments, store: try StateStore(environment: environment))
-        case "status":
-            return try handleStatus(arguments: arguments, store: try StateStore(environment: environment))
-        case "jobs":
-            return try handleJobs(arguments: arguments, store: try StateStore(environment: environment))
-        case "logs":
-            return try handleLogs(arguments: arguments, store: try StateStore(environment: environment))
-        case "artifacts":
-            return try handleArtifacts(arguments: arguments, store: try StateStore(environment: environment))
-        case "cancel":
-            return try handleCancel(arguments: arguments, store: try StateStore(environment: environment))
-        case "cleanup":
-            return try handleCleanup(arguments: arguments, store: try StateStore(environment: environment))
-        case "doctor":
-            return try handleDoctor(arguments: arguments, store: try StateStore(environment: environment))
-        case "_internal":
-            return try handleInternal(arguments: arguments, store: try StateStore(environment: environment))
-        default:
+        guard let definition = Self.command(named: command) else {
             throw XCStewardError.usage("""
             Unknown command: \(command)
 
             \(Self.rootHelp(executableName: executableName))
             """)
         }
+        return try definition.handler(&self, arguments, try StateStore(environment: environment))
     }
 
     private func isHelpRequest(_ argument: String) -> Bool {
@@ -73,52 +65,93 @@ public struct XCStewardApp {
 
     private func helpText(for command: String?, executableName: String) throws -> String {
         if let command {
-            switch command {
-            case "submit":
-                return Self.submitHelp(executableName: executableName)
-            case "status":
-                return Self.statusHelp(executableName: executableName)
-            case "jobs":
-                return Self.jobsHelp(executableName: executableName)
-            case "logs":
-                return Self.logsHelp(executableName: executableName)
-            case "artifacts":
-                return Self.artifactsHelp(executableName: executableName)
-            case "cancel":
-                return Self.cancelHelp(executableName: executableName)
-            case "cleanup":
-                return Self.cleanupHelp(executableName: executableName)
-            case "doctor":
-                return Self.doctorHelp(executableName: executableName)
-            case "_internal":
-                return Self.internalHelp(executableName: executableName)
-            default:
+            guard let definition = Self.command(named: command) else {
                 throw XCStewardError.usage("""
                 Unknown command: \(command)
 
                 \(Self.rootHelp(executableName: executableName))
                 """)
             }
+            return definition.help(executableName)
         }
         return Self.rootHelp(executableName: executableName)
     }
 
+    private static var commandTable: [CLICommandDefinition] {
+        [
+            CLICommandDefinition(
+                name: "submit",
+                rootHelpLine: "  submit     Queue a test job for a configured project.",
+                help: submitHelp,
+                handler: { app, arguments, store in try app.handleSubmit(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "status",
+                rootHelpLine: "  status     Show a job summary.",
+                help: statusHelp,
+                handler: { app, arguments, store in try app.handleStatus(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "jobs",
+                rootHelpLine: "  jobs       List known jobs.",
+                help: jobsHelp,
+                handler: { app, arguments, store in try app.handleJobs(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "logs",
+                rootHelpLine: "  logs       Print the combined log for a job.",
+                help: logsHelp,
+                handler: { app, arguments, store in try app.handleLogs(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "artifacts",
+                rootHelpLine: "  artifacts  Show artifact paths for a job.",
+                help: artifactsHelp,
+                handler: { app, arguments, store in try app.handleArtifacts(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "cancel",
+                rootHelpLine: "  cancel     Cancel a queued or running job.",
+                help: cancelHelp,
+                handler: { app, arguments, store in try app.handleCancel(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "cleanup",
+                rootHelpLine: "  cleanup    Remove old terminal job records and artifact directories.",
+                help: cleanupHelp,
+                handler: { app, arguments, store in try app.handleCleanup(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "doctor",
+                rootHelpLine: "  doctor     Run environment and project diagnostics.",
+                help: doctorHelp,
+                handler: { app, arguments, store in try app.handleDoctor(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "_internal",
+                rootHelpLine: nil,
+                help: internalHelp,
+                handler: { app, arguments, store in try app.handleInternal(arguments: arguments, store: store) }
+            ),
+        ]
+    }
+
+    private static func command(named name: String) -> CLICommandDefinition? {
+        commandTable.first { $0.name == name }
+    }
+
     private static func rootHelp(executableName: String) -> String {
-        """
+        let visibleCommands = commandTable
+            .compactMap(\.rootHelpLine)
+            .joined(separator: "\n")
+        return """
         Usage:
           \(executableName) [--state-root <path>] <command> [options]
           \(executableName) --help
           \(executableName) help [command]
 
         Commands:
-          submit     Queue a test job for a configured project.
-          status     Show a job summary.
-          jobs       List known jobs.
-          logs       Print the combined log for a job.
-          artifacts  Show artifact paths for a job.
-          cancel     Cancel a queued or running job.
-          cleanup    Remove old terminal job records and artifact directories.
-          doctor     Run environment and project diagnostics.
+        \(visibleCommands)
 
         Global options:
           --state-root <path>  Use a specific state directory.
@@ -137,7 +170,9 @@ public struct XCStewardApp {
         Options:
           --project <name>            Project profile name to run.
           --wait                      Block until the job reaches a terminal state.
+          --wait-timeout <seconds>    Max seconds to wait with --wait. Default: 30.
           --json                      Print the job summary as JSON.
+          --progress                  Emit live JSON progress events to stderr.
           --test-plan <name>          Override the profile's default test plan.
           --simulator-id <id>         Override the profile's simulator selection.
           --only-testing <identifier> Restrict execution to a test target or test case. Repeatable.
@@ -231,7 +266,10 @@ public struct XCStewardApp {
           --project <name>  Restrict checks to a configured project profile.
           --fix             Apply safe XCSteward-scoped remediations automatically.
           --fix-global      Also apply broad CoreSimulator remediations. Implies --fix.
+          --dangerously-confirm-global-coresimulator-cleanup
+                           Required with --fix-global before broad CoreSimulator cleanup runs.
           --json            Print the doctor report as JSON.
+          --progress        Emit live JSON progress events to stderr.
           --help, -h        Show this command help.
         """
     }
@@ -247,60 +285,39 @@ public struct XCStewardApp {
     }
 
     private func handleSubmit(arguments: [String], store: StateStore) throws -> Int32 {
-        var arguments = arguments
-        guard let project = consumeOption("--project", from: &arguments) else {
-            throw XCStewardError.usage("submit requires --project")
-        }
-        let wait = removeFlag("--wait", from: &arguments)
-        let json = removeFlag("--json", from: &arguments)
-        let testPlan = consumeOption("--test-plan", from: &arguments)
-        let explicitSimulator = consumeOption("--simulator-id", from: &arguments)
-        var onlyTesting: [String] = []
-        while let value = consumeOption("--only-testing", from: &arguments) {
-            onlyTesting.append(value)
-        }
-        var skipTesting: [String] = []
-        while let value = consumeOption("--skip-testing", from: &arguments) {
-            skipTesting.append(value)
-        }
-        var onlyTestConfigurations: [String] = []
-        while let value = consumeOption("--only-test-configuration", from: &arguments) {
-            onlyTestConfigurations.append(value)
-        }
-        var skipTestConfigurations: [String] = []
-        while let value = consumeOption("--skip-test-configuration", from: &arguments) {
-            skipTestConfigurations.append(value)
-        }
-
-        let request = JobRequest(
-            project: project,
-            testPlan: testPlan,
-            onlyTesting: onlyTesting,
-            skipTesting: skipTesting,
-            onlyTestConfigurations: onlyTestConfigurations,
-            skipTestConfigurations: skipTestConfigurations,
-            simulatorID: explicitSimulator,
-            metadata: [:],
-            wait: wait
-        )
+        let options = try SubmitCommandOptions.parse(arguments: arguments)
+        let request = options.request
+        let workerExecutableURL = try workerExecutableURLIfSpawnRequired(store: store)
         let now = environment.clock.now().timeIntervalSince1970
+        let progress = CLIProgressReporter(enabled: options.progress, clock: environment.clock)
         let jobID = environment.uuidProvider.makeUUID()
         let jobDirectory = environment.paths.jobsRoot.appendingPathComponent(jobID)
         try environment.fileSystem.createDirectory(jobDirectory)
         try environment.fileSystem.writeData(try jsonData(request), to: jobDirectory.appendingPathComponent("request.json"))
-        let record = JobRecord(id: jobID, project: project, state: .queued, resultClass: nil, request: request, summary: nil, jobDirectory: jobDirectory.path, createdAt: now, startedAt: nil, finishedAt: nil, processID: nil, simulatorID: nil, cancelRequested: false)
+        let record = JobRecord(id: jobID, project: request.project, state: .queued, resultClass: nil, request: request, summary: nil, jobDirectory: jobDirectory.path, createdAt: now, startedAt: nil, finishedAt: nil, processID: nil, simulatorID: nil, cancelRequested: false)
         try store.createJob(record)
+        progress.emit("job_queued", job: record)
 
-        if wait {
-            try runWorkerInlineIfPossible(store: store)
-            let terminal = try waitForJob(id: jobID, store: store)
-            try printJob(terminal, json: json)
+        if request.wait {
+            do {
+                try spawnWorkerIfNeeded(executableURL: workerExecutableURL)
+                progress.emit("worker_ready", job: try store.fetchJob(id: jobID) ?? record)
+            } catch {
+                return try failJobAfterWorkerLaunchFailure(error, job: record, store: store, json: options.json, progress: progress)
+            }
+            let terminal = try waitForJob(id: jobID, store: store, timeout: options.waitTimeout, progress: progress)
+            try printJob(terminal, json: options.json)
             return terminal.state == .succeeded ? 0 : 1
         }
 
-        try spawnWorkerIfNeeded()
+        do {
+            try spawnWorkerIfNeeded(executableURL: workerExecutableURL)
+            progress.emit("worker_ready", job: try store.fetchJob(id: jobID) ?? record)
+        } catch {
+            return try failJobAfterWorkerLaunchFailure(error, job: record, store: store, json: options.json, progress: progress)
+        }
         let current = try store.fetchJob(id: jobID) ?? record
-        try printJob(current, json: json)
+        try printJob(current, json: options.json)
         return 0
     }
 
@@ -309,6 +326,10 @@ public struct XCStewardApp {
         let json = removeFlag("--json", from: &arguments)
         guard let jobID = arguments.first else {
             throw XCStewardError.usage("status requires a job id")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("status received unexpected arguments: \(arguments.joined(separator: " "))")
         }
         guard let job = try store.fetchJob(id: jobID) else {
             throw XCStewardError.notFound("Job \(jobID) not found")
@@ -320,6 +341,9 @@ public struct XCStewardApp {
     private func handleJobs(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("jobs received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
         let jobs = try store.listJobs()
         if json {
             let summaries = jobs.map(jobOutput(from:))
@@ -333,7 +357,15 @@ public struct XCStewardApp {
     }
 
     private func handleLogs(arguments: [String], store: StateStore) throws -> Int32 {
-        guard let jobID = arguments.first, let job = try store.fetchJob(id: jobID) else {
+        var arguments = arguments
+        guard let jobID = arguments.first else {
+            throw XCStewardError.usage("logs requires a job id")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("logs received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        guard let job = try store.fetchJob(id: jobID) else {
             throw XCStewardError.notFound("logs requires a valid job id")
         }
         let summary = try loadSummary(for: job)
@@ -347,7 +379,14 @@ public struct XCStewardApp {
     private func handleArtifacts(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
-        guard let jobID = arguments.first, let job = try store.fetchJob(id: jobID) else {
+        guard let jobID = arguments.first else {
+            throw XCStewardError.usage("artifacts requires a job id")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("artifacts received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        guard let job = try store.fetchJob(id: jobID) else {
             throw XCStewardError.notFound("artifacts requires a valid job id")
         }
         let summary = try loadSummary(for: job)
@@ -362,7 +401,14 @@ public struct XCStewardApp {
     private func handleCancel(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
-        guard let jobID = arguments.first, let job = try store.fetchJob(id: jobID) else {
+        guard let jobID = arguments.first else {
+            throw XCStewardError.usage("cancel requires a job id")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("cancel received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        guard let job = try store.fetchJob(id: jobID) else {
             throw XCStewardError.notFound("cancel requires a valid job id")
         }
         if job.state == .queued {
@@ -495,62 +541,271 @@ public struct XCStewardApp {
     private func handleDoctor(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
+        let progress = CLIProgressReporter(enabled: removeFlag("--progress", from: &arguments), clock: environment.clock)
         let fixGlobal = removeFlag("--fix-global", from: &arguments)
+        let confirmGlobalCleanup = removeFlag("--dangerously-confirm-global-coresimulator-cleanup", from: &arguments)
         let fix = removeFlag("--fix", from: &arguments) || fixGlobal
-        let project = consumeOption("--project", from: &arguments)
+        let project = try consumeOption("--project", from: &arguments)
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("doctor received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        if confirmGlobalCleanup && !fixGlobal {
+            throw XCStewardError.usage("doctor --dangerously-confirm-global-coresimulator-cleanup requires --fix-global")
+        }
+        if fixGlobal && !confirmGlobalCleanup {
+            throw XCStewardError.usage(
+                "doctor --fix-global requires --dangerously-confirm-global-coresimulator-cleanup before broad CoreSimulator cleanup can run"
+            )
+        }
         let report = try DoctorEngine(environment: environment, store: store).run(
             project: project,
-            fixOptions: DoctorFixOptions(applySafeFixes: fix, applyGlobalFixes: fixGlobal)
+            fixOptions: DoctorFixOptions(applySafeFixes: fix, applyGlobalFixes: fixGlobal),
+            progress: { event in
+                progress.emit(
+                    event.event,
+                    checkID: event.checkID,
+                    status: event.status
+                )
+            }
         )
         if json {
             FileHandle.standardOutput.write(try jsonData(report))
         } else {
-            print(report.overallStatus.rawValue)
+            printDoctorReport(report)
         }
         return report.overallStatus == .fail ? 1 : 0
     }
 
     private func handleInternal(arguments: [String], store: StateStore) throws -> Int32 {
+        var arguments = arguments
         guard arguments.first == "run-worker" else {
             throw XCStewardError.usage("Unknown internal command")
         }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("_internal received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        signal(SIGINT, SIG_IGN)
         try Worker(environment: environment, store: store).run()
         return 0
     }
 
-    private func waitForJob(id: String, store: StateStore) throws -> JobRecord {
-        let deadline = Date().addingTimeInterval(30)
+    private func waitForJob(
+        id: String,
+        store: StateStore,
+        timeout: TimeInterval,
+        progress: CLIProgressReporter
+    ) throws -> JobRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastSignature: String?
+        var nextHeartbeat = environment.clock.now().addingTimeInterval(5)
         while Date() < deadline {
-            if let job = try store.fetchJob(id: id), job.state.isTerminal {
-                return job
+            if let job = try store.fetchJob(id: id) {
+                let signature = [
+                    job.state.rawValue,
+                    job.resultClass?.rawValue ?? "",
+                    job.processID.map(String.init) ?? "",
+                    job.simulatorID ?? "",
+                ].joined(separator: "|")
+                let now = environment.clock.now()
+                if signature != lastSignature || now >= nextHeartbeat {
+                    progress.emit("job_status", job: job)
+                    lastSignature = signature
+                    nextHeartbeat = now.addingTimeInterval(5)
+                }
+                if job.state.isTerminal {
+                    progress.emit("job_terminal", job: job)
+                    return job
+                }
             }
             Thread.sleep(forTimeInterval: 0.1)
+        }
+        if let job = try store.fetchJob(id: id),
+           let terminalJob = terminalJobFromPersistedSummary(job) {
+            progress.emit("job_terminal", job: terminalJob)
+            return terminalJob
+        }
+        if let job = try store.fetchJob(id: id) {
+            progress.emit("wait_timeout", job: job)
         }
         throw XCStewardError.commandFailed("Timed out waiting for job \(id)")
     }
 
-    private func runWorkerInlineIfPossible(store: StateStore) throws {
-        try Worker(environment: environment, store: store).run()
+    private func terminalJobFromPersistedSummary(_ job: JobRecord) -> JobRecord? {
+        let root = URL(fileURLWithPath: job.jobDirectory)
+        let summaryURL = root.appendingPathComponent("artifacts/summary.json")
+        guard environment.fileSystem.fileExists(summaryURL) else {
+            return nil
+        }
+        guard let data = try? environment.fileSystem.readData(from: summaryURL),
+              let summary = try? decodeJSON(JobSummary.self, from: data) else {
+            return nil
+        }
+        guard summary.state.isTerminal else {
+            return nil
+        }
+        var terminalJob = job
+        terminalJob.state = summary.state
+        terminalJob.resultClass = summary.resultClass
+        terminalJob.summary = summary
+        terminalJob.startedAt = summary.startedAt
+        terminalJob.finishedAt = summary.finishedAt
+        terminalJob.simulatorID = summary.simulatorID
+        return terminalJob
     }
 
-    private func spawnWorkerIfNeeded() throws {
+    private func spawnWorkerIfNeeded(executableURL preflightExecutableURL: URL?) throws {
         let current = try StateStore(environment: environment).currentLease()
         if let current, isPIDAlive(current.pid) {
             return
         }
+        let executableURL: URL
+        if let preflightExecutableURL {
+            executableURL = preflightExecutableURL
+        } else {
+            executableURL = try resolvedCurrentExecutableURL()
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: environment.processInfo.arguments.first ?? CommandLine.arguments[0])
+        process.executableURL = executableURL
         process.arguments = ["--state-root", environment.paths.stateRoot.path, "_internal", "run-worker"]
         process.environment = environment.processInfo.environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
-        let deadline = Date().addingTimeInterval(1)
+        let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             if let lease = try StateStore(environment: environment).currentLease(), isPIDAlive(lease.pid) {
                 return
             }
+            if !process.isRunning {
+                break
+            }
             Thread.sleep(forTimeInterval: 0.05)
+        }
+        if !process.isRunning {
+            throw XCStewardError.commandFailed(
+                "XCSteward worker launched from \(executableURL.path) exited before acquiring the queue lease"
+            )
+        }
+        throw XCStewardError.commandFailed(
+            "XCSteward worker launched from \(executableURL.path) did not acquire the queue lease within 5 seconds"
+        )
+    }
+
+    private func workerExecutableURLIfSpawnRequired(store: StateStore) throws -> URL? {
+        if let current = try store.currentLease(), isPIDAlive(current.pid) {
+            return nil
+        }
+        return try resolvedCurrentExecutableURL()
+    }
+
+    private func resolvedCurrentExecutableURL() throws -> URL {
+        if let executableURL = try? resolvedExecutablePathFromProcessImage() {
+            return executableURL
+        }
+        if let bundleExecutableURL = Bundle.main.executableURL {
+            return try canonicalExecutableURL(bundleExecutableURL)
+        }
+        throw XCStewardError.commandFailed("Unable to resolve the XCSteward executable for worker launch")
+    }
+
+    private func resolvedExecutablePathFromProcessImage() throws -> URL {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        let result = buffer.withUnsafeMutableBufferPointer { pointer in
+            _NSGetExecutablePath(pointer.baseAddress, &size)
+        }
+        guard result == 0 else {
+            throw XCStewardError.commandFailed("Unable to read the current XCSteward executable path")
+        }
+        let path = buffer.withUnsafeBufferPointer { pointer -> String in
+            guard let baseAddress = pointer.baseAddress else {
+                return ""
+            }
+            return String(cString: baseAddress)
+        }
+        return try canonicalExecutableURL(URL(fileURLWithPath: path))
+    }
+
+    private func canonicalExecutableURL(_ url: URL) throws -> URL {
+        let absoluteURL = url.path.hasPrefix("/")
+            ? url
+            : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(url.path)
+        guard let resolvedPointer = realpath(absoluteURL.path, nil) else {
+            let reason = String(cString: strerror(errno))
+            throw XCStewardError.commandFailed(
+                "Unable to resolve the XCSteward executable at \(absoluteURL.path): \(reason)"
+            )
+        }
+        defer { free(resolvedPointer) }
+        let resolvedPath = String(cString: resolvedPointer)
+        guard FileManager.default.isExecutableFile(atPath: resolvedPath) else {
+            throw XCStewardError.commandFailed(
+                "Resolved XCSteward executable is not executable: \(resolvedPath)"
+            )
+        }
+        return URL(fileURLWithPath: resolvedPath)
+    }
+
+    private func failJobAfterWorkerLaunchFailure(
+        _ error: Error,
+        job: JobRecord,
+        store: StateStore,
+        json: Bool,
+        progress: CLIProgressReporter
+    ) throws -> Int32 {
+        let failure = XCStewardError.commandFailed("Unable to launch XCSteward worker for job \(job.id): \(error)")
+        let finished = environment.clock.now().timeIntervalSince1970
+        let summary = JobSummaryFactory().preExecutionFailureSummary(
+            job: job,
+            error: failure,
+            resultClass: .runnerBootstrapFailure,
+            finishedAt: finished
+        )
+        try? persistPreExecutionFailureEvidence(summary: summary, job: job)
+        try store.updateJob(
+            id: job.id,
+            patch: JobStatePatch(
+                state: .failed,
+                resultClass: .runnerBootstrapFailure,
+                summary: summary,
+                startedAt: summary.startedAt,
+                finishedAt: finished,
+                simulatorID: job.simulatorID
+            )
+        )
+        let failedJob = try store.fetchJob(id: job.id) ?? job
+        progress.emit("worker_launch_failed", job: failedJob)
+        try printJob(failedJob, json: json)
+        return 1
+    }
+
+    private func persistPreExecutionFailureEvidence(summary: JobSummary, job: JobRecord) throws {
+        let paths = ExecutionPaths(job: job)
+        try paths.createDirectories(using: environment.fileSystem)
+        try environment.fileSystem.writeData(try jsonData(summary), to: paths.summary)
+        try environment.fileSystem.writeData(
+            try jsonData(PreExecutionFailureRunMetadata(summary: summary)),
+            to: paths.runMetadata
+        )
+        try environment.fileSystem.appendData(Data("\(summary.summaryLine)\n".utf8), to: paths.combinedLog)
+    }
+
+    private func printDoctorReport(_ report: DoctorReport) {
+        print(report.overallStatus.rawValue)
+        for check in report.checks where check.status != .pass || check.fixed {
+            let fixed = check.fixed ? " fixed" : ""
+            print("\(check.status.rawValue) \(check.id)\(fixed): \(check.message)")
+            if let manualAction = check.manualAction {
+                print("  action: \(manualAction)")
+            }
+            if let evidencePath = check.evidencePath {
+                print("  evidence: \(evidencePath)")
+            }
+            if let failureExcerpt = check.failureExcerpt {
+                print("  detail: \(failureExcerpt)")
+            }
         }
     }
 

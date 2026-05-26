@@ -1,5 +1,28 @@
 import Foundation
 
+enum XCResultSummaryProbeResult {
+    case parsed(XCResultSummary)
+    case missingBundle
+    case temporarilyUnavailable
+    case invalid
+
+    var summary: XCResultSummary? {
+        if case .parsed(let summary) = self {
+            return summary
+        }
+        return nil
+    }
+
+    var failsSuccessfulTestRun: Bool {
+        switch self {
+        case .parsed, .temporarilyUnavailable:
+            return false
+        case .missingBundle, .invalid:
+            return true
+        }
+    }
+}
+
 struct XCResultReader {
     private let environment: AppEnvironment
     private let parser = XCResultParser()
@@ -10,65 +33,66 @@ struct XCResultReader {
         self.warningSink = warningSink
     }
 
-    func summary(at resultBundle: URL) -> XCResultSummary? {
-        guard environment.fileSystem.fileExists(resultBundle) else {
-            return nil
-        }
-        let command = ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", resultBundle.path]
-        let tool: ToolResult
-        do {
-            tool = try environment.toolRunner.run(
-                tool: "xcrun",
-                arguments: Array(command.dropFirst()),
-                environment: [:],
-                workingDirectory: nil,
-                timeout: 30
-            )
-        } catch {
-            recordWarning(
-                source: "xcresulttool.summary",
-                command: command,
-                message: "xcresulttool summary probe could not run: \(error)"
-            )
-            return nil
-        }
-        guard tool.exitCode == 0, !tool.timedOut, let data = tool.output.data(using: .utf8) else {
-            recordWarning(
-                source: "xcresulttool.summary",
-                command: command,
-                message: tool.timedOut
-                    ? "xcresulttool summary probe timed out"
-                    : "xcresulttool summary probe failed with exit code \(tool.exitCode)",
-                result: tool
-            )
-            return nil
-        }
-        guard let summary = parser.summary(from: data) else {
-            recordWarning(
-                source: "xcresulttool.summary",
-                command: command,
-                message: "xcresulttool summary probe produced unparseable output",
-                result: tool
-            )
-            return nil
-        }
-        return summary
+    func summary(at resultBundle: URL, context: ToolExecutionContext? = nil) -> XCResultSummary? {
+        summaryProbe(at: resultBundle, context: context).summary
     }
 
-    func testTimings(at resultBundle: URL) -> [TestTimingSample] {
+    func summaryProbe(at resultBundle: URL, context: ToolExecutionContext? = nil) -> XCResultSummaryProbeResult {
+        guard environment.fileSystem.fileExists(resultBundle) else {
+            return .missingBundle
+        }
+        let command = ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", resultBundle.path]
+        let timeout = summaryProbeTimeout(context: context)
+        for attempt in 1...2 {
+            let tool: ToolResult
+            do {
+                tool = try runProbe(command: command, timeout: timeout, context: context)
+            } catch {
+                recordWarning(
+                    source: "xcresulttool.summary",
+                    command: command,
+                    message: "xcresulttool summary probe could not run: \(error)"
+                )
+                return .temporarilyUnavailable
+            }
+            guard tool.exitCode == 0, !tool.timedOut, let data = tool.output.data(using: .utf8) else {
+                recordWarning(
+                    source: "xcresulttool.summary",
+                    command: command,
+                    message: tool.timedOut
+                        ? "xcresulttool summary probe timed out"
+                        : "xcresulttool summary probe failed with exit code \(tool.exitCode)",
+                    result: tool
+                )
+                if tool.timedOut, attempt == 1 {
+                    Thread.sleep(forTimeInterval: 0.5)
+                    continue
+                }
+                return tool.timedOut ? .temporarilyUnavailable : .invalid
+            }
+            guard let summary = parser.summary(from: data) else {
+                recordWarning(
+                    source: "xcresulttool.summary",
+                    command: command,
+                    message: "xcresulttool summary probe produced unparseable output",
+                    result: tool
+                )
+                return .invalid
+            }
+            return .parsed(summary)
+        }
+        return .temporarilyUnavailable
+    }
+
+    func testTimings(at resultBundle: URL, context: ToolExecutionContext? = nil) -> [TestTimingSample] {
         guard environment.fileSystem.fileExists(resultBundle) else {
             return []
         }
         let command = ["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", resultBundle.path]
+        let timeout = summaryProbeTimeout(context: context)
         let tool: ToolResult
         do {
-            tool = try environment.toolRunner.run(
-                tool: "xcrun",
-                arguments: Array(command.dropFirst()),
-                environment: [:],
-                workingDirectory: nil,
-                timeout: 30
-            )
+            tool = try runProbe(command: command, timeout: timeout, context: context)
         } catch {
             recordWarning(
                 source: "xcresulttool.tests",
@@ -99,6 +123,106 @@ struct XCResultReader {
             )
             return []
         }
+    }
+
+    private func summaryProbeTimeout(context: ToolExecutionContext?) -> TimeInterval {
+        if let configured = configuredProbeTimeout() {
+            return configured
+        }
+        guard let context else {
+            return 60
+        }
+        return min(context.profile.timeouts.test, max(60, context.profile.timeouts.test * 0.25))
+    }
+
+    private func configuredProbeTimeout() -> TimeInterval? {
+        guard let raw = environment.processInfo.environment["XCSTEWARD_XCRESULT_PROBE_TIMEOUT_SECONDS"],
+              let value = TimeInterval(raw),
+              value > 0 else {
+            return nil
+        }
+        return value
+    }
+
+    private func runProbe(command: [String], timeout: TimeInterval, context: ToolExecutionContext?) throws -> ToolResult {
+        guard let tool = command.first else {
+            throw XCStewardError.commandFailed("Unable to run empty xcresult probe command")
+        }
+        let arguments = Array(command.dropFirst())
+        guard let context else {
+            return try environment.toolRunner.run(
+                tool: tool,
+                arguments: arguments,
+                environment: [:],
+                workingDirectory: nil,
+                timeout: timeout
+            )
+        }
+
+        var activePID: Int32?
+        defer {
+            if let activePID {
+                try? context.store.clearJobProcessID(id: context.jobID, processID: activePID)
+            } else {
+                try? context.store.clearJobProcessID(id: context.jobID)
+            }
+        }
+
+        do {
+            let result = try environment.toolRunner.run(
+                tool: tool,
+                arguments: arguments,
+                environment: [:],
+                workingDirectory: nil,
+                timeout: timeout,
+                processStarted: { pid in
+                    activePID = pid
+                    try context.store.updateJob(
+                        id: context.jobID,
+                        patch: JobStatePatch(state: .running, processID: pid)
+                    )
+                },
+                shouldTerminate: {
+                    try context.store.fetchJob(id: context.jobID)?.cancelRequested == true
+                }
+            )
+            recordCommand(command: command, timeout: timeout, context: context, result: result, error: nil)
+            return result
+        } catch {
+            recordCommand(command: command, timeout: timeout, context: context, result: nil, error: error)
+            throw error
+        }
+    }
+
+    private func recordCommand(
+        command: [String],
+        timeout: TimeInterval,
+        context: ToolExecutionContext,
+        result: ToolResult?,
+        error: Error?
+    ) {
+        guard let commandLog = context.commandLog,
+              let tool = command.first else {
+            return
+        }
+        let record = RunCommandRecord(
+            tool: tool,
+            arguments: Array(command.dropFirst()),
+            commandLine: command.joined(separator: " "),
+            workingDirectory: nil,
+            timeoutSeconds: timeout,
+            phase: "artifact",
+            exitCode: result?.exitCode,
+            timedOut: result?.timedOut ?? false,
+            error: error.map { String(describing: $0) }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard var data = try? encoder.encode(record) else {
+            return
+        }
+        data.append(contentsOf: "\n".utf8)
+        try? environment.fileSystem.appendData(data, to: commandLog)
     }
 
     private func recordWarning(
@@ -150,11 +274,14 @@ struct XCResultParser: Sendable {
         }
 
         func numericValue(_ value: Any?) -> Double? {
+            if let number = value as? NSNumber {
+                guard CFGetTypeID(number) != CFBooleanGetTypeID() else {
+                    return nil
+                }
+                return number.doubleValue
+            }
             if value is Bool {
                 return nil
-            }
-            if let number = value as? NSNumber {
-                return number.doubleValue
             }
             if let string = value as? String {
                 return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))

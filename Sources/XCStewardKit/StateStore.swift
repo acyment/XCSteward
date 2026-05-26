@@ -1,4 +1,5 @@
 import CSQLite
+import Darwin
 import Foundation
 
 public struct JobStatePatch {
@@ -58,19 +59,38 @@ public final class StateStore {
 
     public init(environment: AppEnvironment) throws {
         self.environment = environment
-        try environment.fileSystem.createDirectory(environment.paths.stateRoot)
-        try environment.fileSystem.createDirectory(environment.paths.jobsRoot)
-        try environment.fileSystem.createDirectory(environment.paths.projectsRoot)
-        try environment.fileSystem.createDirectory(environment.paths.doctorRoot)
+        do {
+            try environment.fileSystem.createDirectory(environment.paths.stateRoot)
+            try environment.fileSystem.createDirectory(environment.paths.jobsRoot)
+            try environment.fileSystem.createDirectory(environment.paths.projectsRoot)
+            try environment.fileSystem.createDirectory(environment.paths.doctorRoot)
+        } catch {
+            throw XCStewardError.stateRootUnavailable(
+                "Unable to prepare XCSteward state root at \(environment.paths.stateRoot.path): \(error.localizedDescription)"
+            )
+        }
         var handle: OpaquePointer?
-        if sqlite3_open(environment.paths.dbURL.path, &handle) != SQLITE_OK {
-            throw XCStewardError.commandFailed("Unable to open database")
+        let openResult = sqlite3_open(environment.paths.dbURL.path, &handle)
+        if openResult != SQLITE_OK {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown SQLite error"
+            if let handle {
+                sqlite3_close(handle)
+            }
+            throw XCStewardError.stateRootUnavailable(
+                "Unable to open XCSteward state database at \(environment.paths.dbURL.path): \(message)"
+            )
         }
         guard let handle else {
-            throw XCStewardError.commandFailed("Unable to initialize database handle")
+            throw XCStewardError.stateRootUnavailable(
+                "Unable to initialize XCSteward state database at \(environment.paths.dbURL.path)"
+            )
         }
         self.db = handle
         sqlite3_busy_timeout(db, 5_000)
+        let initializationLock = try StateStoreInitializationLock.acquire(
+            stateRoot: environment.paths.stateRoot
+        )
+        defer { initializationLock.release() }
         try execute("PRAGMA journal_mode=WAL;")
         try execute("PRAGMA synchronous=NORMAL;")
         try StateStoreSchema.migrate(store: self)
@@ -195,16 +215,116 @@ public final class StateStore {
         try workerLease.recoverStaleIfNeeded()
     }
 
+    @discardableResult
+    public func recoverUnownedRunningJobs() throws -> Int {
+        if let lease = try workerLease.current(), isPIDAlive(lease.pid) {
+            return 0
+        }
+        try terminateVerifiedOrphanedRunnerProcesses()
+        return try jobs.interruptRecoverableRunningJobs(
+            finishedAt: environment.clock.now().timeIntervalSince1970,
+            reason: "worker process exited before the job completed"
+        )
+    }
+
+    fileprivate func terminateVerifiedOrphanedRunnerProcesses() throws {
+        for job in try jobs.running() {
+            guard let processID = job.processID,
+                  processID > 0,
+                  processID != getpid(),
+                  isPIDAlive(processID),
+                  recordedProcessLooksLikeOwnedRunner(processID) else {
+                continue
+            }
+            terminateRecordedProcessGroup(processID)
+        }
+    }
+
+    private func recordedProcessLooksLikeOwnedRunner(_ pid: Int32) -> Bool {
+        guard let command = processCommand(for: pid) else {
+            return false
+        }
+        return RunnerProcessDetector.isCompeting(command: command, policy: .executor)
+    }
+
+    private func processCommand(for pid: Int32) -> String? {
+        if let command = processCommand(for: pid, tool: "ps") {
+            return command
+        }
+        return processCommand(for: pid, tool: "/bin/ps")
+    }
+
+    private func processCommand(for pid: Int32, tool: String) -> String? {
+        guard let result = try? environment.toolRunner.run(
+            tool: tool,
+            arguments: ["-p", "\(pid)", "-o", "command="],
+            environment: environment.processInfo.environment,
+            workingDirectory: nil,
+            timeout: 2,
+            processStarted: nil
+        ),
+              result.exitCode == 0 else {
+            return nil
+        }
+        let command = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return command.isEmpty ? nil : command
+    }
+
+    private func terminateRecordedProcessGroup(_ pid: Int32) {
+        sendSignal(SIGTERM, toRecordedProcessGroupFor: pid)
+        if waitForProcessExit(pid, timeout: 1) {
+            return
+        }
+        sendSignal(SIGKILL, toRecordedProcessGroupFor: pid)
+        _ = waitForProcessExit(pid, timeout: 1)
+    }
+
+    private func sendSignal(_ signal: Int32, toRecordedProcessGroupFor pid: Int32) {
+        if kill(-pid, signal) != 0 {
+            _ = kill(pid, signal)
+        }
+    }
+
+    private func waitForProcessExit(_ pid: Int32, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !isPIDAlive(pid) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !isPIDAlive(pid)
+    }
+
+    fileprivate func appendRecoveryLog(for job: JobRecord, reason: String) {
+        guard let jobDirectory = jobDirectoryIfUnderJobsRoot(job.jobDirectory) else {
+            return
+        }
+        let combinedLog = jobDirectory.appendingPathComponent("logs/combined.log")
+        let line = "Interrupted: \(reason)\n"
+        try? environment.fileSystem.appendData(Data(line.utf8), to: combinedLog)
+    }
+
+    private func jobDirectoryIfUnderJobsRoot(_ path: String) -> URL? {
+        let root = environment.paths.jobsRoot.standardizedFileURL.path
+        let candidateURL = URL(fileURLWithPath: path).standardizedFileURL
+        let candidate = candidateURL.path
+        guard candidate == root || candidate.hasPrefix(root + "/") else {
+            return nil
+        }
+        return candidateURL
+    }
+
     fileprivate func execute(_ sql: String, values: [SQLiteValue] = []) throws {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw XCStewardError.commandFailed("Failed to prepare SQL: \(sql)")
+            throw XCStewardError.commandFailed("Failed to prepare SQL: \(sql) (\(lastSQLiteError()))")
         }
         defer { sqlite3_finalize(statement) }
         try bind(values, to: statement)
         let step = sqlite3_step(statement)
         guard step == SQLITE_DONE || step == SQLITE_ROW else {
-            throw XCStewardError.commandFailed("Failed to execute SQL: \(sql)")
+            throw XCStewardError.commandFailed("Failed to execute SQL: \(sql) (\(lastSQLiteError()))")
         }
     }
 
@@ -237,10 +357,20 @@ public final class StateStore {
         defer { sqlite3_finalize(statement) }
         try bind(values, to: statement)
         var results: [T] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE {
+                return results
+            }
+            guard step == SQLITE_ROW else {
+                throw XCStewardError.commandFailed("Failed to execute SQL query: \(lastSQLiteError())")
+            }
             results.append(try map(statement))
         }
-        return results
+    }
+
+    private func lastSQLiteError() -> String {
+        String(cString: sqlite3_errmsg(db))
     }
 
     fileprivate func querySingle<T>(_ sql: String, values: [SQLiteValue], map: (OpaquePointer?) throws -> T) throws -> T? {
@@ -271,6 +401,46 @@ public final class StateStore {
                 }
             }
         }
+    }
+}
+
+private final class StateStoreInitializationLock {
+    private let descriptor: Int32
+    private var released = false
+
+    private init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    static func acquire(stateRoot: URL) throws -> StateStoreInitializationLock {
+        let lockURL = stateRoot.appendingPathComponent(".state-store-init.lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw XCStewardError.stateRootUnavailable(
+                "Unable to open XCSteward state database initialization lock at \(lockURL.path)"
+            )
+        }
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            let message = String(cString: strerror(errno))
+            Darwin.close(descriptor)
+            throw XCStewardError.stateRootUnavailable(
+                "Unable to acquire XCSteward state database initialization lock at \(lockURL.path): \(message)"
+            )
+        }
+        return StateStoreInitializationLock(descriptor: descriptor)
+    }
+
+    func release() {
+        guard !released else {
+            return
+        }
+        released = true
+        _ = flock(descriptor, LOCK_UN)
+        Darwin.close(descriptor)
+    }
+
+    deinit {
+        release()
     }
 }
 
@@ -383,6 +553,14 @@ struct JobRecordGateway {
         try store.querySingle("SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1;", values: [], map: mapRow)
     }
 
+    func running() throws -> [JobRecord] {
+        try store.query(
+            "SELECT * FROM jobs WHERE state = ? ORDER BY created_at ASC;",
+            values: [.text(JobState.running.rawValue)],
+            map: mapRow
+        )
+    }
+
     func claimNextQueued() throws -> JobRecord? {
         try store.withImmediateTransaction {
             guard let job = try nextQueued() else {
@@ -469,20 +647,51 @@ struct JobRecordGateway {
         )
     }
 
-    func markRunningJobsInterrupted(finishedAt: Double) throws {
-        try store.execute(
-            """
-            UPDATE jobs
-            SET state = ?, result_class = ?, finished_at = ?
-            WHERE state = ?;
-            """,
-            values: [
-                .text(JobState.interrupted.rawValue),
-                .text(ResultClass.internalError.rawValue),
-                .double(finishedAt),
-                .text(JobState.running.rawValue),
-            ]
-        )
+    @discardableResult
+    func interruptRecoverableRunningJobs(finishedAt: Double, reason: String) throws -> Int {
+        var interrupted = 0
+        for job in try running() where shouldInterruptDuringRecovery(job) {
+            store.appendRecoveryLog(for: job, reason: reason)
+            let summary = JobSummaryFactory().interruptedSummary(
+                job: job,
+                reason: reason,
+                finishedAt: finishedAt
+            )
+            let summaryText = try String(data: jsonData(summary), encoding: .utf8)
+            try store.execute(
+                """
+                UPDATE jobs
+                SET state = ?,
+                    result_class = ?,
+                    summary_json = ?,
+                    finished_at = ?,
+                    process_id = NULL
+                WHERE id = ?
+                  AND state = ?;
+                """,
+                values: [
+                    .text(JobState.interrupted.rawValue),
+                    .text(ResultClass.internalError.rawValue),
+                    .text(summaryText),
+                    .double(finishedAt),
+                    .text(job.id),
+                    .text(JobState.running.rawValue),
+                ]
+            )
+            guard store.changedRowCount() == 1 else {
+                continue
+            }
+            try store.simulatorLeases.release(jobID: job.id)
+            interrupted += 1
+        }
+        return interrupted
+    }
+
+    private func shouldInterruptDuringRecovery(_ job: JobRecord) -> Bool {
+        guard let processID = job.processID, processID > 0 else {
+            return true
+        }
+        return !isPIDAlive(processID)
     }
 
     private func mapRow(_ statement: OpaquePointer?) throws -> JobRecord {
@@ -523,15 +732,17 @@ struct WorkerLeaseGateway {
     }
 
     func acquire(workerID: String, pid: Int32) throws -> Bool {
-        if let current = try current(), isPIDAlive(current.pid) {
-            return false
+        try store.withImmediateTransaction {
+            if let current = try current(), isPIDAlive(current.pid) {
+                return false
+            }
+            try release()
+            try store.execute(
+                "INSERT INTO worker_lease (singleton, worker_id, pid, heartbeat, job_id) VALUES (1, ?, ?, ?, NULL);",
+                values: [.text(workerID), .int(Int64(pid)), .double(store.environment.clock.now().timeIntervalSince1970)]
+            )
+            return true
         }
-        try release()
-        try store.execute(
-            "INSERT INTO worker_lease (singleton, worker_id, pid, heartbeat, job_id) VALUES (1, ?, ?, ?, NULL);",
-            values: [.text(workerID), .int(Int64(pid)), .double(store.environment.clock.now().timeIntervalSince1970)]
-        )
-        return true
     }
 
     func updateHeartbeat(jobID: String?) throws {
@@ -564,8 +775,12 @@ struct WorkerLeaseGateway {
         guard let lease = try current(), !isPIDAlive(lease.pid) else {
             return false
         }
-        try store.jobs.markRunningJobsInterrupted(finishedAt: store.environment.clock.now().timeIntervalSince1970)
         try release()
+        try store.terminateVerifiedOrphanedRunnerProcesses()
+        _ = try store.jobs.interruptRecoverableRunningJobs(
+            finishedAt: store.environment.clock.now().timeIntervalSince1970,
+            reason: "worker process exited before the job completed"
+        )
         _ = try store.simulatorLeases.recoverStale()
         return true
     }
@@ -644,10 +859,23 @@ struct SimulatorLeaseGateway {
         let leases = try list()
         var recovered = 0
         for lease in leases where !isPIDAlive(lease.pid) {
+            if try hasLiveRunningProcess(for: lease) {
+                continue
+            }
             try release(simulatorID: lease.simulatorID)
             recovered += 1
         }
         return recovered
+    }
+
+    private func hasLiveRunningProcess(for lease: SimulatorLease) throws -> Bool {
+        guard let job = try store.jobs.fetch(id: lease.jobID),
+              job.state == .running,
+              let processID = job.processID,
+              processID > 0 else {
+            return false
+        }
+        return isPIDAlive(processID)
     }
 
     private func mapRow(_ statement: OpaquePointer?) throws -> SimulatorLease {

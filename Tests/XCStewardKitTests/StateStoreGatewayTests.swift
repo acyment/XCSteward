@@ -64,10 +64,33 @@ final class StateStoreGatewayTests: XCTestCase {
         XCTAssertFalse(try store.hasQueuedJobs())
     }
 
+    func testConcurrentWorkerLeaseAcquisitionAllowsOnlyOneOwner() throws {
+        let stateRoot = try makeTempDirectory().appendingPathComponent("state")
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+
+        let acquired = try acquireWorkerLeasesConcurrently(stateRoot: stateRoot, claimantCount: 16)
+
+        XCTAssertEqual(acquired.count, 1)
+        XCTAssertEqual(try store.currentLease()?.workerID, acquired.first)
+        try store.releaseLease()
+    }
+
+    func testConcurrentFreshStateStoreInitializationDoesNotRaceWALSetup() throws {
+        let stateRoot = try makeTempDirectory().appendingPathComponent("state")
+
+        let opened = try openStateStoresConcurrently(stateRoot: stateRoot, openerCount: 24)
+
+        XCTAssertEqual(opened, 24)
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        try store.jobs.create(gatewayJob(id: "job-after-concurrent-init", state: .queued))
+        XCTAssertNotNil(try store.jobs.fetch(id: "job-after-concurrent-init"))
+    }
+
     func testWorkerLeaseGatewayRecoversStaleLeaseAndMarksRunningJobsInterrupted() throws {
         let store = try gatewayStore()
-        try store.jobs.create(gatewayJob(id: "running-job", state: .running))
+        try store.jobs.create(gatewayJob(id: "running-job", state: .running, simulatorID: "SIM-1"))
         XCTAssertTrue(try store.workerLease.acquire(workerID: "worker-1", pid: 0))
+        XCTAssertTrue(try store.simulatorLeases.acquire(simulatorID: "SIM-1", jobID: "running-job", pid: 0))
 
         let recovered = try store.workerLease.recoverStaleIfNeeded()
 
@@ -76,6 +99,83 @@ final class StateStoreGatewayTests: XCTestCase {
         let job = try XCTUnwrap(store.jobs.fetch(id: "running-job"))
         XCTAssertEqual(job.state, .interrupted)
         XCTAssertEqual(job.resultClass, .internalError)
+        XCTAssertNil(job.processID)
+        XCTAssertEqual(job.summary?.state, .interrupted)
+        XCTAssertEqual(job.summary?.summaryLine, "Interrupted: worker process exited before the job completed")
+        XCTAssertTrue(try store.simulatorLeases.list().isEmpty)
+    }
+
+    func testStoreRecoversUnownedRunningJobsWithoutWorkerLease() throws {
+        let store = try gatewayStore()
+        try store.jobs.create(gatewayJob(id: "running-job", state: .running, simulatorID: "SIM-1"))
+        XCTAssertTrue(try store.simulatorLeases.acquire(simulatorID: "SIM-1", jobID: "running-job", pid: 0))
+
+        let recovered = try store.recoverUnownedRunningJobs()
+
+        XCTAssertEqual(recovered, 1)
+        let job = try XCTUnwrap(store.jobs.fetch(id: "running-job"))
+        XCTAssertEqual(job.state, .interrupted)
+        XCTAssertEqual(job.resultClass, .internalError)
+        XCTAssertEqual(job.summary?.artifacts.combinedLog, "/tmp/running-job/logs/combined.log")
+        XCTAssertTrue(try store.simulatorLeases.list().isEmpty)
+    }
+
+    func testRecoveryPreservesRunningJobAndLeaseWhileRecordedProcessIsAlive() throws {
+        let store = try gatewayStore()
+        try store.jobs.create(gatewayJob(
+            id: "running-job",
+            state: .running,
+            processID: getpid(),
+            simulatorID: "SIM-1"
+        ))
+        XCTAssertTrue(try store.workerLease.acquire(workerID: "worker-1", pid: 0))
+        XCTAssertTrue(try store.simulatorLeases.acquire(simulatorID: "SIM-1", jobID: "running-job", pid: 0))
+
+        XCTAssertTrue(try store.workerLease.recoverStaleIfNeeded())
+        let recovered = try store.recoverUnownedRunningJobs()
+
+        XCTAssertEqual(recovered, 0)
+        XCTAssertNil(try store.workerLease.current())
+        let job = try XCTUnwrap(store.jobs.fetch(id: "running-job"))
+        XCTAssertEqual(job.state, .running)
+        XCTAssertNil(job.summary)
+        XCTAssertEqual(try store.simulatorLeases.list().map(\.simulatorID), ["SIM-1"])
+    }
+
+    func testRecoveryDoesNotTerminateUnrelatedLiveRecordedProcess() throws {
+        let unrelated = Process()
+        unrelated.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        unrelated.arguments = ["30"]
+        try unrelated.run()
+        let unrelatedPID = unrelated.processIdentifier
+        defer {
+            if unrelated.isRunning {
+                unrelated.terminate()
+            }
+            unrelated.waitUntilExit()
+        }
+
+        let store = try gatewayStore()
+        try store.jobs.create(gatewayJob(
+            id: "running-job",
+            state: .running,
+            processID: unrelatedPID,
+            simulatorID: "SIM-1"
+        ))
+        XCTAssertTrue(try store.workerLease.acquire(workerID: "worker-1", pid: 0))
+        XCTAssertTrue(try store.simulatorLeases.acquire(simulatorID: "SIM-1", jobID: "running-job", pid: 0))
+
+        XCTAssertTrue(try store.workerLease.recoverStaleIfNeeded())
+        let recovered = try store.recoverUnownedRunningJobs()
+
+        XCTAssertEqual(recovered, 0)
+        XCTAssertTrue(isPIDAlive(unrelatedPID))
+        XCTAssertNil(try store.workerLease.current())
+        let job = try XCTUnwrap(store.jobs.fetch(id: "running-job"))
+        XCTAssertEqual(job.state, .running)
+        XCTAssertNil(job.summary)
+        XCTAssertEqual(job.processID, unrelatedPID)
+        XCTAssertEqual(try store.simulatorLeases.list().map(\.simulatorID), ["SIM-1"])
     }
 
     func testSimulatorLeaseGatewayRecoversStaleAndReleasesByJob() throws {
@@ -169,6 +269,59 @@ private func claimJobsConcurrently(stateRoot: URL, claimantCount: Int) throws ->
     return results.claimed.sorted()
 }
 
+private func acquireWorkerLeasesConcurrently(stateRoot: URL, claimantCount: Int) throws -> [String] {
+    let queue = DispatchQueue(label: "XCStewardTests.StateStore.workerLeaseClaimers", attributes: .concurrent)
+    let group = DispatchGroup()
+    let results = ConcurrentClaimResults()
+
+    for index in 0..<claimantCount {
+        group.enter()
+        queue.async {
+            defer { group.leave() }
+            do {
+                let workerID = "worker-\(index)"
+                let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+                if try store.acquireLease(workerID: workerID, pid: getpid()) {
+                    results.append(workerID)
+                }
+            } catch {
+                results.record(error)
+            }
+        }
+    }
+
+    group.wait()
+    if let firstError = results.firstError {
+        throw firstError
+    }
+    return results.claimed.sorted()
+}
+
+private func openStateStoresConcurrently(stateRoot: URL, openerCount: Int) throws -> Int {
+    let queue = DispatchQueue(label: "XCStewardTests.StateStore.initializers", attributes: .concurrent)
+    let group = DispatchGroup()
+    let results = ConcurrentClaimResults()
+
+    for index in 0..<openerCount {
+        group.enter()
+        queue.async {
+            defer { group.leave() }
+            do {
+                _ = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+                results.append("opened-\(index)")
+            } catch {
+                results.record(error)
+            }
+        }
+    }
+
+    group.wait()
+    if let firstError = results.firstError {
+        throw firstError
+    }
+    return results.claimed.count
+}
+
 private final class ConcurrentClaimResults: @unchecked Sendable {
     private let lock = NSLock()
     private var claimedIDs: [String] = []
@@ -205,7 +358,9 @@ private func gatewayJob(
     id: String,
     state: JobState,
     resultClass: ResultClass? = nil,
-    finishedAt: Double? = nil
+    finishedAt: Double? = nil,
+    processID: Int32? = nil,
+    simulatorID: String? = nil
 ) -> JobRecord {
     let request = JobRequest(
         project: "demo",
@@ -226,8 +381,8 @@ private func gatewayJob(
         createdAt: 1,
         startedAt: state == .queued ? nil : 2,
         finishedAt: finishedAt,
-        processID: nil,
-        simulatorID: nil,
+        processID: processID,
+        simulatorID: simulatorID,
         cancelRequested: false
     )
 }
@@ -247,7 +402,7 @@ private func gatewaySummary(job: JobRecord, state: JobState, resultClass: Result
         onlyTesting: [],
         simulatorID: "SIM-123",
         counts: JobCounts(testsRun: 1, testsFailed: 0, testsSkipped: 0),
-        artifacts: JobArtifacts(xcresult: nil, combinedLog: nil, buildLog: nil, testLog: nil, derivedData: nil, diagnostics: nil, junit: nil),
+            artifacts: JobArtifacts(xcresult: nil, combinedLog: nil, buildLog: nil, testLog: nil, derivedData: nil, diagnostics: nil, junit: nil, commandEvents: nil),
         summaryLine: "Tests succeeded",
         metadata: [:]
     )

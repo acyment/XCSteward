@@ -3,6 +3,10 @@ import Foundation
 struct XcodebuildCommandBuilder {
     var profile: ProjectProfile
 
+    func showDestinations() -> [String] {
+        baseArguments() + ["-showdestinations"]
+    }
+
     func buildForTesting(simulatorID: String, paths: ExecutionPaths, request: JobRequest) -> [String] {
         var arguments = baseArguments()
         arguments.append(contentsOf: [

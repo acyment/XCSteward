@@ -47,6 +47,10 @@ struct CoreSimulatorRuntimeProbe: Decodable {
         name ?? identifier ?? "unknown runtime"
     }
 
+    var normalizedVersion: String? {
+        DoctorOutputParsers.normalizedVersion(from: [name, identifier].compactMap { $0 }.joined(separator: " "))
+    }
+
     enum CodingKeys: String, CodingKey {
         case identifier
         case name

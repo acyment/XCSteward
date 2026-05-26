@@ -1,5 +1,7 @@
 import Foundation
+import Darwin
 import XCTest
+@testable import XCStewardKit
 
 final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
     func testLiveXcodeManagedParallelSmoke() throws {
@@ -11,10 +13,15 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
             throw XCTSkip("Set XCSTEWARD_LIVE_SIMULATOR_ID to an iOS Simulator UDID before running the live smoke test.")
         }
 
-        let temp = try makeTempDirectory()
+        let temp = try makeUntrackedTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
-        let project = try liveProject(environment: environment, temp: temp)
+        defer {
+            cleanupLiveSmokeState(stateRoot: stateRoot)
+        }
+
+        let project = try liveProject(environment: environment)
         let maxWorkers = max(Int(environment["XCSTEWARD_LIVE_MAX_WORKERS"] ?? "") ?? 2, 1)
+        let waitTimeout = nonEmpty(environment["XCSTEWARD_LIVE_WAIT_TIMEOUT"]) ?? "600"
 
         try writeLiveProfile(
             stateRoot: stateRoot,
@@ -29,6 +36,7 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
                 "--state-root", stateRoot.path,
                 "--project", "live-xcode-managed",
                 "--wait",
+                "--wait-timeout", waitTimeout,
                 "--json",
             ],
             environment: [
@@ -36,7 +44,10 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(result.status, 0, "stdout: \(result.stdout)\nstderr: \(result.stderr)")
+        guard result.status == 0 else {
+            XCTFail("stateRoot: \(stateRoot.path)\nstdout: \(result.stdout)\nstderr: \(result.stderr)")
+            return
+        }
         let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
         XCTAssertEqual(json["state"] as? String, "succeeded")
         XCTAssertEqual(json["result_class"] as? String, "success")
@@ -50,6 +61,8 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
         let xcresult = try XCTUnwrap(artifacts["xcresult"] as? String)
         XCTAssertTrue(FileManager.default.fileExists(atPath: xcresult))
 
+        let jobDir = stateRoot.appendingPathComponent("jobs/\(jobID)")
+        let summaryURL = jobDir.appendingPathComponent("artifacts/summary.json")
         let runMetadataURL = stateRoot.appendingPathComponent("jobs/\(jobID)/artifacts/run-metadata.json")
         let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: runMetadataURL)) as? [String: Any])
         let profileMetadata = try XCTUnwrap(runMetadata["profile"] as? [String: Any])
@@ -57,9 +70,22 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
         XCTAssertEqual(parallelMetadata["mode"] as? String, "xcode-managed")
         XCTAssertEqual(parallelMetadata["maxWorkers"] as? Int, maxWorkers)
         XCTAssertEqual(parallelMetadata["exactWorkers"] as? Bool, true)
+
+        let probeWarnings = runMetadata["probe_warnings"] as? [[String: Any]] ?? []
+        print([
+            "XCSTEWARD_LIVE_SMOKE_EVIDENCE",
+            "state_root=\(stateRoot.path)",
+            "job_id=\(jobID)",
+            "job_dir=\(jobDir.path)",
+            "summary=\(summaryURL.path)",
+            "run_metadata=\(runMetadataURL.path)",
+            "xcresult=\(xcresult)",
+            "tests_run=\(testsRun)",
+            "probe_warnings=\(probeWarnings.count)",
+        ].joined(separator: " "))
     }
 
-    private func liveProject(environment: [String: String], temp: URL) throws -> LiveSmokeProject {
+    private func liveProject(environment: [String: String]) throws -> LiveSmokeProject {
         if let repoRoot = nonEmpty(environment["XCSTEWARD_LIVE_REPO_ROOT"]) {
             guard let scheme = nonEmpty(environment["XCSTEWARD_LIVE_SCHEME"]) else {
                 throw XCTSkip("Set XCSTEWARD_LIVE_SCHEME when XCSTEWARD_LIVE_REPO_ROOT points at an existing project.")
@@ -73,15 +99,7 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
             )
         }
 
-        let repoRoot = temp.appendingPathComponent("LiveSmokePackage")
-        try createGeneratedLiveSmokePackage(at: repoRoot)
-        return LiveSmokeProject(
-            repoRoot: repoRoot,
-            scheme: "XCStewardLiveSmoke",
-            projectPath: nil,
-            workspacePath: nil,
-            minimumExpectedTests: 4
-        )
+        return try bundledDemoAppProject()
     }
 
     private func writeLiveProfile(
@@ -121,68 +139,22 @@ final class LiveXcodeManagedParallelSmokeTests: XCTestCase {
         try writeText(lines.joined(separator: "\n"), to: stateRoot.appendingPathComponent("projects/live-xcode-managed.toml"))
     }
 
-    private func createGeneratedLiveSmokePackage(at repoRoot: URL) throws {
-        try writeText(
-            """
-            // swift-tools-version: 5.9
-            import PackageDescription
-
-            let package = Package(
-                name: "XCStewardLiveSmoke",
-                platforms: [.iOS(.v16)],
-                products: [
-                    .library(name: "XCStewardLiveSmoke", targets: ["XCStewardLiveSmoke"]),
-                ],
-                targets: [
-                    .target(name: "XCStewardLiveSmoke"),
-                    .testTarget(name: "XCStewardLiveSmokeTests", dependencies: ["XCStewardLiveSmoke"]),
-                ]
-            )
-            """,
-            to: repoRoot.appendingPathComponent("Package.swift")
-        )
-        try writeText(
-            """
-            public func stewardLiveSmokeValue() -> Int {
-                42
-            }
-            """,
-            to: repoRoot.appendingPathComponent("Sources/XCStewardLiveSmoke/Smoke.swift")
-        )
-        try writeText(
-            """
-            import XCTest
-            @testable import XCStewardLiveSmoke
-
-            final class ParallelSmokeATests: XCTestCase {
-                func testA() {
-                    Thread.sleep(forTimeInterval: 0.5)
-                    XCTAssertEqual(stewardLiveSmokeValue(), 42)
-                }
-            }
-
-            final class ParallelSmokeBTests: XCTestCase {
-                func testB() {
-                    Thread.sleep(forTimeInterval: 0.5)
-                    XCTAssertEqual(stewardLiveSmokeValue(), 42)
-                }
-            }
-
-            final class ParallelSmokeCTests: XCTestCase {
-                func testC() {
-                    Thread.sleep(forTimeInterval: 0.5)
-                    XCTAssertEqual(stewardLiveSmokeValue(), 42)
-                }
-            }
-
-            final class ParallelSmokeDTests: XCTestCase {
-                func testD() {
-                    Thread.sleep(forTimeInterval: 0.5)
-                    XCTAssertEqual(stewardLiveSmokeValue(), 42)
-                }
-            }
-            """,
-            to: repoRoot.appendingPathComponent("Tests/XCStewardLiveSmokeTests/ParallelSmokeTests.swift")
+    private func bundledDemoAppProject() throws -> LiveSmokeProject {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let demoRoot = repoRoot.appendingPathComponent("Examples/DemoApp")
+        let projectFile = demoRoot.appendingPathComponent("DemoApp.xcodeproj/project.pbxproj")
+        guard FileManager.default.fileExists(atPath: projectFile.path) else {
+            throw XCTSkip("Set XCSTEWARD_LIVE_REPO_ROOT to an iOS project, or keep Examples/DemoApp available.")
+        }
+        return LiveSmokeProject(
+            repoRoot: demoRoot,
+            scheme: "DemoApp",
+            projectPath: "DemoApp.xcodeproj",
+            workspacePath: nil,
+            minimumExpectedTests: 1
         )
     }
 }
@@ -200,4 +172,105 @@ private func nonEmpty(_ value: String?) -> String? {
         return nil
     }
     return trimmed
+}
+
+private func cleanupLiveSmokeState(stateRoot: URL) {
+    terminateRecordedLiveSmokeProcesses(stateRoot: stateRoot)
+    terminateProcessesReferencing(stateRoot: stateRoot)
+}
+
+private func terminateRecordedLiveSmokeProcesses(stateRoot: URL) {
+    guard let store = try? StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot))) else {
+        return
+    }
+
+    var pids = Set<Int32>()
+    if let jobs = try? store.listJobs() {
+        for job in jobs {
+            if let processID = job.processID {
+                pids.insert(processID)
+            }
+        }
+    }
+    if let workerLease = try? store.currentLease() {
+        pids.insert(workerLease.pid)
+    }
+    if let simulatorLeases = try? store.listSimulatorLeases() {
+        for lease in simulatorLeases {
+            pids.insert(lease.pid)
+        }
+    }
+
+    for pid in pids.sorted() {
+        terminateLiveSmokePID(pid)
+    }
+}
+
+private func terminateProcessesReferencing(stateRoot: URL) {
+    let rootPath = stateRoot.path
+    for process in liveSmokeProcessListing() where process.command.contains(rootPath) {
+        terminateLiveSmokePID(process.pid)
+    }
+}
+
+private func liveSmokeProcessListing() -> [(pid: Int32, command: String)] {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-axo", "pid=,command="]
+
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = Pipe()
+
+    do {
+        try process.run()
+    } catch {
+        return []
+    }
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard let text = String(data: data, encoding: .utf8) else {
+        return []
+    }
+    return text.split(separator: "\n").compactMap { line in
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let separator = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else {
+            return nil
+        }
+        let pidText = trimmed[..<separator]
+        let command = trimmed[separator...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = Int32(pidText), !command.isEmpty else {
+            return nil
+        }
+        return (pid: pid, command: command)
+    }
+}
+
+private func terminateLiveSmokePID(_ pid: Int32) {
+    guard pid > 1, pid != getpid(), isPIDAlive(pid) else {
+        return
+    }
+
+    if kill(-pid, SIGTERM) != 0 {
+        _ = kill(pid, SIGTERM)
+    }
+    if waitForLiveSmokePIDExit(pid, timeout: 2) {
+        return
+    }
+
+    if kill(-pid, SIGKILL) != 0 {
+        _ = kill(pid, SIGKILL)
+    }
+    _ = waitForLiveSmokePIDExit(pid, timeout: 2)
+}
+
+private func waitForLiveSmokePIDExit(_ pid: Int32, timeout: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if !isPIDAlive(pid) {
+            return true
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    return !isPIDAlive(pid)
 }

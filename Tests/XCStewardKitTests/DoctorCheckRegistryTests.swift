@@ -12,6 +12,7 @@ final class DoctorCheckRegistryTests: XCTestCase {
                 "global.clt_vs_xcode_selection",
                 "global.first_launch_components",
                 "global.iphonesimulator_sdk_present",
+                "global.iphonesimulator_runtime_compatible",
                 "global.simulator_runtime_installed",
                 "global.simulator_runtime_unavailable",
                 "global.runtime_dyld_cache_state",

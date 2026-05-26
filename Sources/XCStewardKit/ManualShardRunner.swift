@@ -6,6 +6,7 @@ private struct ManualShardExecutionResult: Sendable {
     var report: ShardReport
     var outcome: TestOutcome
     var parsedSummary: XCResultSummary?
+    var timingSamples: [TestTimingSample]
 }
 
 private final class ManualShardRunState: @unchecked Sendable {
@@ -74,9 +75,9 @@ private final class ManualShardRunState: @unchecked Sendable {
 private extension ResultClass {
     var isManualShardFatal: Bool {
         switch self {
-        case .runnerBootstrapFailure, .artifactFailure, .internalError:
+        case .runnerBootstrapFailure, .unsupportedDestination, .artifactFailure, .internalError:
             return true
-        case .success, .buildFailure, .testFailure, .testTimeout, .canceled:
+        case .success, .buildFailure, .buildTimeout, .testFailure, .testTimeout, .canceled:
             return false
         }
     }
@@ -199,6 +200,7 @@ final class ManualShardRunner: @unchecked Sendable {
         let queue = DispatchQueue(label: "XCSteward.ManualShardRunner.shards", attributes: .concurrent)
         let state = ManualShardRunState()
         let jobID = context.jobID
+        let commandLog = context.commandLog
         for (index, identifiers) in shardGroups.enumerated() {
             let shardPaths = paths.shardPaths(index: index)
             let simulatorID = simulatorIDs[index]
@@ -212,7 +214,8 @@ final class ManualShardRunner: @unchecked Sendable {
                     let shardContext = ToolExecutionContext(
                         profile: profile,
                         jobID: jobID,
-                        store: try StateStore(environment: self.environment)
+                        store: try StateStore(environment: self.environment),
+                        commandLog: commandLog
                     )
                     let result = try self.runManualShard(
                         testReference: testReference,
@@ -253,6 +256,12 @@ final class ManualShardRunner: @unchecked Sendable {
         let sorted = results.sorted { $0.report.shardID < $1.report.shardID }
         let reports = sorted.map(\.report)
         let resultClass = planner.aggregateResultClass(sorted.map(\.outcome.resultClass))
+        let timingSamples = sorted
+            .filter { $0.outcome.resultClass != .runnerBootstrapFailure && $0.outcome.resultClass != .artifactFailure }
+            .flatMap(\.timingSamples)
+        if !timingSamples.isEmpty {
+            try? context.store.recordTestTimings(project: profile.name, samples: timingSamples)
+        }
         if resultClass != .canceled {
             try? context.store.updateJob(id: context.jobID, patch: JobStatePatch(cancelRequested: false))
         }
@@ -378,25 +387,25 @@ final class ManualShardRunner: @unchecked Sendable {
         )
         var outcome = runtime.classify(run: run, resultBundle: shardPaths.resultBundle)
         if shouldRetryManualShardFailure(outcome: outcome, run: run) {
-            retryReason = outcome.resultClass.rawValue
-            let preservedAttempt = try preserveAttemptArtifacts(
+            let retryEvidence = try recordRetryAttemptEvidence(
                 fileSystem: environment.fileSystem,
                 sourceResultBundle: shardPaths.resultBundle,
                 sourceResultStream: shardPaths.resultStream,
                 attemptPaths: shardPaths.attemptPaths(attempt: attempts),
                 attempt: attempts,
                 phase: "manual-shard",
-                resultClass: outcome.resultClass,
-                exitCode: run.exitCode,
-                timedOut: run.timedOut,
-                retryReason: retryReason
-            )
-            attemptArtifacts.append(preservedAttempt)
-            if let diagnostic = runtime.captureSimulatorDiagnostics(
-                simulatorID: simulatorID,
-                outputURL: shardPaths.simulatorDiagnostics(attempt: attempts),
-                context: context
+                outcome: outcome,
+                run: run
             ) {
+                runtime.captureSimulatorDiagnostics(
+                    simulatorID: simulatorID,
+                    outputURL: shardPaths.simulatorDiagnostics(attempt: attempts),
+                    context: context
+                )
+            }
+            retryReason = retryEvidence.retryReason
+            attemptArtifacts.append(retryEvidence.artifact)
+            if let diagnostic = retryEvidence.simulatorDiagnostic {
                 simulatorDiagnostics.append(diagnostic)
             }
             attempts = 2
@@ -456,9 +465,6 @@ final class ManualShardRunner: @unchecked Sendable {
         }
         let parsedSummary = resultReporter.parseXCResultSummary(at: shardPaths.resultBundle)
         let timingSamples = resultReporter.parseXCResultTestTimings(at: shardPaths.resultBundle)
-        if !timingSamples.isEmpty, outcome.resultClass != .runnerBootstrapFailure, outcome.resultClass != .artifactFailure {
-            try? context.store.recordTestTimings(project: context.profile.name, samples: timingSamples)
-        }
         return ManualShardExecutionResult(
             report: ShardReport(
                 shardID: shardPaths.id,
@@ -476,7 +482,8 @@ final class ManualShardRunner: @unchecked Sendable {
                 attemptArtifacts: attemptArtifacts
             ),
             outcome: outcome,
-            parsedSummary: parsedSummary
+            parsedSummary: parsedSummary,
+            timingSamples: timingSamples
         )
     }
 
@@ -494,13 +501,6 @@ final class ManualShardRunner: @unchecked Sendable {
         context: ToolExecutionContext,
         state: ManualShardRunState
     ) throws -> ToolResult {
-        try runtime.prepareSimulatorPrivacy(
-            simulatorID: simulatorID,
-            logURL: shardPaths.testLog,
-            combinedLog: combinedLog,
-            context: context
-        )
-        try runtime.prepareResultStreamIfNeeded(for: context.profile.resultStream, path: shardPaths.resultStream)
         let arguments = XcodebuildCommandBuilder(profile: context.profile).manualShardTest(
             testReference: testReference,
             simulatorID: simulatorID,
@@ -517,21 +517,20 @@ final class ManualShardRunner: @unchecked Sendable {
                 state.clearActiveProcess(activePID)
             }
         }
-        return try runtime.runAndLog(
-            tool: "xcodebuild",
-            arguments: arguments,
-            timeout: context.profile.timeouts.test,
-            logURL: shardPaths.testLog,
-            combinedLog: combinedLog,
-            context: context,
-            environmentOverrides: runtime.testRunnerEnvironment(
-                context: context,
+        return try runtime.runXcodebuildTestAttempt(
+            XcodebuildTestAttempt(
+                arguments: arguments,
+                simulatorID: simulatorID,
+                resultStream: shardPaths.resultStream,
+                logURL: shardPaths.testLog,
+                combinedLog: combinedLog,
                 temporaryDirectory: shardPaths.temporaryDirectory,
                 phase: "manual-shard",
                 shardID: shardPaths.id,
                 shardIndex: shardIndex,
                 totalShards: totalShards
             ),
+            context: context,
             processStarted: { pid in
                 activePID = pid
                 if state.recordActiveProcess(pid) {
@@ -689,7 +688,7 @@ final class ManualShardRunner: @unchecked Sendable {
             return runtime.shouldRetryBootstrapFailure(run: run)
         case .artifactFailure:
             return true
-        case .success, .buildFailure, .testFailure, .testTimeout, .canceled, .internalError:
+        case .success, .buildFailure, .buildTimeout, .testFailure, .testTimeout, .unsupportedDestination, .canceled, .internalError:
             return false
         }
     }

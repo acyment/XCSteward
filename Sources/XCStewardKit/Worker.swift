@@ -23,6 +23,7 @@ final class Worker: @unchecked Sendable {
 
     func run() throws {
         _ = try store.recoverStaleLeaseIfNeeded()
+        _ = try store.recoverUnownedRunningJobs()
         _ = try store.recoverStaleSimulatorLeases()
         guard try store.acquireLease(workerID: workerID, pid: getpid()) else {
             return
@@ -146,18 +147,46 @@ final class Worker: @unchecked Sendable {
 
     private func finishFailed(job: JobRecord, error: Error, store: StateStore) throws {
         let finished = environment.clock.now().timeIntervalSince1970
-        let summary = JobSummaryFactory().internalFailureSummary(job: job, error: error, finishedAt: finished)
+        let resultClass = preExecutionResultClass(for: error)
+        let summary = JobSummaryFactory().preExecutionFailureSummary(
+            job: job,
+            error: error,
+            resultClass: resultClass,
+            finishedAt: finished
+        )
+        try? persistPreExecutionFailureEvidence(summary: summary, job: job)
         try store.updateJob(
             id: job.id,
             patch: JobStatePatch(
                 state: .failed,
-                resultClass: .internalError,
+                resultClass: resultClass,
                 summary: summary,
                 startedAt: summary.startedAt,
                 finishedAt: finished,
                 simulatorID: job.simulatorID
             )
         )
+    }
+
+    private func preExecutionResultClass(for error: Error) -> ResultClass {
+        switch error {
+        case XCStewardError.invalidConfiguration,
+             XCStewardError.notFound:
+            return .runnerBootstrapFailure
+        default:
+            return .internalError
+        }
+    }
+
+    private func persistPreExecutionFailureEvidence(summary: JobSummary, job: JobRecord) throws {
+        let paths = ExecutionPaths(job: job)
+        try paths.createDirectories(using: environment.fileSystem)
+        try environment.fileSystem.writeData(try jsonData(summary), to: paths.summary)
+        try environment.fileSystem.writeData(
+            try jsonData(PreExecutionFailureRunMetadata(summary: summary)),
+            to: paths.runMetadata
+        )
+        try environment.fileSystem.appendData(Data("\(summary.summaryLine)\n".utf8), to: paths.combinedLog)
     }
 
     private static func maxConcurrentJobs(from environment: [String: String]) -> Int {
@@ -167,6 +196,54 @@ final class Worker: @unchecked Sendable {
             return 1
         }
         return value
+    }
+}
+
+struct PreExecutionFailureRunMetadata: Encodable {
+    var jobID: String
+    var project: String
+    var state: JobState
+    var resultClass: ResultClass?
+    var submittedAt: Double
+    var startedAt: Double?
+    var finishedAt: Double?
+    var durationSeconds: Double?
+    var simulatorID: String?
+    var exitCode: Int32?
+    var error: String
+    var artifacts: JobArtifacts
+    var commands: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case project
+        case state
+        case resultClass = "result_class"
+        case submittedAt = "submitted_at"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case durationSeconds = "duration_seconds"
+        case simulatorID = "simulator_id"
+        case exitCode = "exit_code"
+        case error
+        case artifacts
+        case commands
+    }
+
+    init(summary: JobSummary) {
+        self.jobID = summary.jobID
+        self.project = summary.project
+        self.state = summary.state
+        self.resultClass = summary.resultClass
+        self.submittedAt = summary.submittedAt
+        self.startedAt = summary.startedAt
+        self.finishedAt = summary.finishedAt
+        self.durationSeconds = summary.durationSeconds
+        self.simulatorID = summary.simulatorID
+        self.exitCode = summary.exitCode
+        self.error = summary.summaryLine
+        self.artifacts = summary.artifacts
+        self.commands = []
     }
 }
 

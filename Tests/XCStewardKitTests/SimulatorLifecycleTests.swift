@@ -69,6 +69,80 @@ final class SimulatorLifecycleTests: XCTestCase {
         ))
     }
 
+    func testDefaultSimulatorIDIsValidatedBeforeUse() throws {
+        let fixture = try makeLifecycleFixture(profile: lifecycleProfile())
+        fixture.tooling.results = [
+            ToolResult(
+                exitCode: 0,
+                output: """
+                {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":true}]}}
+                """,
+                timedOut: false
+            ),
+        ]
+
+        let simulatorID = try fixture.lifecycle.resolveSimulatorID(
+            request: lifecycleRequest(),
+            context: fixture.context
+        )
+
+        XCTAssertEqual(simulatorID, "SIM-123")
+        XCTAssertEqual(fixture.tooling.commands, [
+            "xcrun simctl list devices --json",
+        ])
+    }
+
+    func testMissingDefaultSimulatorIDFailsBeforeMutation() throws {
+        let fixture = try makeLifecycleFixture(profile: lifecycleProfile(defaultSimulatorID: "SIM-MISSING"))
+        fixture.tooling.results = [
+            ToolResult(
+                exitCode: 0,
+                output: """
+                {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"iPhone 17 Pro","udid":"SIM-123","state":"Shutdown","isAvailable":true}]}}
+                """,
+                timedOut: false
+            ),
+        ]
+
+        XCTAssertThrowsError(try fixture.lifecycle.resolveSimulatorID(
+            request: lifecycleRequest(),
+            context: fixture.context
+        )) { error in
+            let description = String(describing: error)
+            XCTAssertTrue(description.contains("Configured simulator SIM-MISSING"))
+            XCTAssertTrue(description.contains("refusing to fall back"))
+        }
+        XCTAssertEqual(fixture.tooling.commands, [
+            "xcrun simctl list devices --json",
+        ])
+    }
+
+    func testUnavailableDefaultSimulatorIDFailsBeforeMutation() throws {
+        let fixture = try makeLifecycleFixture(profile: lifecycleProfile(defaultSimulatorID: "SIM-OLD"))
+        fixture.tooling.results = [
+            ToolResult(
+                exitCode: 0,
+                output: """
+                {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"name":"Old iPhone","udid":"SIM-OLD","state":"Shutdown","isAvailable":false,"availabilityError":"runtime is unavailable"}]}}
+                """,
+                timedOut: false
+            ),
+        ]
+
+        XCTAssertThrowsError(try fixture.lifecycle.resolveSimulatorID(
+            request: lifecycleRequest(),
+            context: fixture.context
+        )) { error in
+            let description = String(describing: error)
+            XCTAssertTrue(description.contains("Configured simulator SIM-OLD"))
+            XCTAssertTrue(description.contains("is unavailable"))
+            XCTAssertTrue(description.contains("refusing to mutate simulator state"))
+        }
+        XCTAssertEqual(fixture.tooling.commands, [
+            "xcrun simctl list devices --json",
+        ])
+    }
+
     func testManagedSimulatorCreateOutputRequiresSingleUDID() throws {
         let managed = ManagedSimulator(
             name: "XCSteward Managed",
@@ -88,6 +162,43 @@ final class SimulatorLifecycleTests: XCTestCase {
         )) { error in
             XCTAssertTrue(String(describing: error).contains("expected a single simulator UDID"))
         }
+    }
+
+    func testManagedSimulatorCreateResolvesDisplayNamesToIdentifiers() throws {
+        let managed = ManagedSimulator(
+            name: "XCSteward Managed",
+            deviceType: "iPhone 17 Pro",
+            runtime: "iOS 18.0",
+            cloneForShards: false
+        )
+        let fixture = try makeLifecycleFixture(profile: lifecycleProfile(defaultSimulatorID: nil, managedSimulator: managed))
+        fixture.tooling.results = [
+            ToolResult(exitCode: 0, output: #"{"devices":{}}"#, timedOut: false),
+            ToolResult(
+                exitCode: 0,
+                output: #"{"devicetypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro","name":"iPhone 17 Pro"}]}"#,
+                timedOut: false
+            ),
+            ToolResult(
+                exitCode: 0,
+                output: #"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","name":"iOS 18.0","isAvailable":true}]}"#,
+                timedOut: false
+            ),
+            ToolResult(exitCode: 0, output: "00000000-0000-0000-0000-000000000123\n", timedOut: false),
+        ]
+
+        let simulatorID = try fixture.lifecycle.resolveSimulatorID(
+            request: lifecycleRequest(),
+            context: fixture.context
+        )
+
+        XCTAssertEqual(simulatorID, "00000000-0000-0000-0000-000000000123")
+        XCTAssertEqual(fixture.tooling.commands, [
+            "xcrun simctl list devices --json",
+            "xcrun simctl list devicetypes --json",
+            "xcrun simctl list runtimes --json",
+            "xcrun simctl create XCSteward Managed com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro com.apple.CoreSimulator.SimRuntime.iOS-18-0",
+        ])
     }
 
     func testManagedSimulatorDiscoveryUsesJSONNameAndUDID() throws {

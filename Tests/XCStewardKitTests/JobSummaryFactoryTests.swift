@@ -58,6 +58,50 @@ final class JobSummaryFactoryTests: XCTestCase {
         XCTAssertEqual(summary.artifacts.derivedData, "/tmp/xcsteward/job-1/derived-data")
     }
 
+    func testPreExecutionFailureSummaryDoesNotExposeResultBundle() {
+        let job = summaryFactoryJob(state: .running, startedAt: nil, jobDirectory: "/tmp/xcsteward/job-1")
+
+        let summary = JobSummaryFactory().preExecutionFailureSummary(
+            job: job,
+            error: SummaryFactoryError.example,
+            resultClass: .runnerBootstrapFailure,
+            finishedAt: 20
+        )
+
+        XCTAssertEqual(summary.state, .failed)
+        XCTAssertEqual(summary.resultClass, .runnerBootstrapFailure)
+        XCTAssertEqual(summary.startedAt, 20)
+        XCTAssertEqual(summary.durationSeconds, 0)
+        XCTAssertEqual(summary.summaryLine, "example failure")
+        XCTAssertNil(summary.artifacts.xcresult)
+        XCTAssertNil(summary.artifacts.junit)
+        XCTAssertEqual(summary.artifacts.combinedLog, "/tmp/xcsteward/job-1/logs/combined.log")
+    }
+
+    func testInterruptedSummaryKeepsArtifactsAndExplainsRecovery() {
+        let job = summaryFactoryJob(
+            state: .running,
+            startedAt: 12,
+            simulatorID: "SIM-1",
+            jobDirectory: "/tmp/xcsteward/job-1"
+        )
+
+        let summary = JobSummaryFactory().interruptedSummary(
+            job: job,
+            reason: "worker process exited before the job completed",
+            finishedAt: 20
+        )
+
+        XCTAssertEqual(summary.state, .interrupted)
+        XCTAssertEqual(summary.resultClass, .internalError)
+        XCTAssertEqual(summary.startedAt, 12)
+        XCTAssertEqual(summary.finishedAt, 20)
+        XCTAssertEqual(summary.durationSeconds, 8)
+        XCTAssertEqual(summary.simulatorID, "SIM-1")
+        XCTAssertEqual(summary.summaryLine, "Interrupted: worker process exited before the job completed")
+        XCTAssertEqual(summary.artifacts.combinedLog, "/tmp/xcsteward/job-1/logs/combined.log")
+    }
+
     func testFallbackSummaryMirrorsJobStateAndDefaultArtifacts() {
         let job = summaryFactoryJob(
             state: .interrupted,

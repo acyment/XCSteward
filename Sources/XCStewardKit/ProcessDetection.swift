@@ -117,11 +117,52 @@ enum RunnerProcessDetector {
     }
 
     private static func commandTokens(in command: String) -> [String] {
-        command
-            .split(whereSeparator: \.isWhitespace)
-            .map { token in
-                String(token).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+
+        func flushToken() {
+            guard !current.isEmpty else {
+                return
             }
-            .filter { !$0.isEmpty }
+            tokens.append(current)
+            current = ""
+        }
+
+        for character in command {
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+            if character == "\\" {
+                escaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "\"" || character == "'" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace {
+                flushToken()
+            } else {
+                current.append(character)
+            }
+        }
+
+        if escaping {
+            current.append("\\")
+        }
+        flushToken()
+        return tokens
     }
 }

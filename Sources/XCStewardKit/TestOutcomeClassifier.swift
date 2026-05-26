@@ -10,7 +10,7 @@ struct TestOutcomeClassifier {
     func classify(run: ToolResult, resultBundle: URL) -> TestOutcome {
         if run.timedOut {
             return TestOutcome(
-                resultClass: isRunnerBootstrapFailure(run: run) ? .runnerBootstrapFailure : .testTimeout,
+                resultClass: isPreTestRunnerBootstrapFailure(run: run) ? .runnerBootstrapFailure : .testTimeout,
                 exitCode: run.exitCode
             )
         }
@@ -20,7 +20,7 @@ struct TestOutcomeClassifier {
                 exitCode: 0
             )
         }
-        if isRunnerConfigurationFailure(run: run) {
+        if isPreTestRunnerConfigurationFailure(run: run) {
             return TestOutcome(resultClass: .runnerBootstrapFailure, exitCode: run.exitCode)
         }
         if !resultBundleExists(resultBundle) {
@@ -30,18 +30,22 @@ struct TestOutcomeClassifier {
     }
 
     func shouldRetryBootstrapFailure(run: ToolResult) -> Bool {
-        isRunnerBootstrapFailure(run: run)
+        isPreTestRunnerBootstrapFailure(run: run)
     }
 
-    private func isRunnerBootstrapFailure(run: ToolResult) -> Bool {
-        output(run.output, containsAny: bootstrapFailurePatterns)
+    private func isPreTestRunnerBootstrapFailure(run: ToolResult) -> Bool {
+        !testExecutionStarted(run.output) && outputContainsAny(run.output, patterns: bootstrapFailurePatterns)
     }
 
-    private func isRunnerConfigurationFailure(run: ToolResult) -> Bool {
-        output(run.output, containsAny: configurationFailurePatterns)
+    private func isPreTestRunnerConfigurationFailure(run: ToolResult) -> Bool {
+        !testExecutionStarted(run.output) && outputContainsAny(run.output, patterns: configurationFailurePatterns)
     }
 
-    private func output(_ output: String, containsAny patterns: [String]) -> Bool {
+    private func testExecutionStarted(_ output: String) -> Bool {
+        outputContainsAny(output, patterns: testStartPatterns)
+    }
+
+    private func outputContainsAny(_ output: String, patterns: [String]) -> Bool {
         patterns.contains { pattern in
             output.range(of: pattern, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
@@ -62,6 +66,14 @@ struct TestOutcomeClassifier {
             "does not have an associated test plan named",
             "Unable to find a device matching the provided destination specifier",
             "No .xctestrun file was generated under",
+        ]
+    }
+
+    private var testStartPatterns: [String] {
+        [
+            "Testing started",
+            "Test Suite '",
+            "Test Case '-[",
         ]
     }
 }

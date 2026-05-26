@@ -48,9 +48,19 @@ final class SimulatorLifecycle: @unchecked Sendable {
                requestedSimulatorID != profile.defaultSimulatorID {
                 throw XCStewardError.invalidConfiguration("Requested simulator override \(requestedSimulatorID) is not allowed by profile \(profile.name)")
             }
+            try validateConfiguredSimulatorID(
+                requestedSimulatorID,
+                source: "requested simulator override",
+                context: context
+            )
             return requestedSimulatorID
         }
         if let defaultSimulatorID = profile.defaultSimulatorID {
+            try validateConfiguredSimulatorID(
+                defaultSimulatorID,
+                source: "default_simulator_id",
+                context: context
+            )
             return defaultSimulatorID
         }
         if let managed = profile.managedSimulator {
@@ -298,22 +308,158 @@ final class SimulatorLifecycle: @unchecked Sendable {
         }
     }
 
+    func validateConfiguredSimulatorID(
+        _ simulatorID: String,
+        source: String,
+        context: ToolExecutionContext
+    ) throws {
+        let profile = context.profile
+        let trimmedID = simulatorID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else {
+            throw XCStewardError.invalidConfiguration("Profile \(profile.name) has an empty \(source)")
+        }
+        let list = try tooling.runTool(
+            tool: "xcrun",
+            arguments: ["simctl", "list", "devices", "--json"],
+            timeout: profile.timeouts.boot,
+            context: context
+        )
+        try tooling.throwIfCanceled(list, context: context)
+        if list.exitCode != 0 || list.timedOut {
+            throw tooling.commandFailed(
+                "Unable to list simulators while validating \(source) \(trimmedID) for profile \(profile.name)",
+                output: list.output
+            )
+        }
+        let device: SimctlDevice?
+        do {
+            device = try simulatorDevice(withUDID: trimmedID, in: list.output)
+        } catch {
+            throw tooling.commandFailed(
+                "Unable to parse simulator list while validating \(source) \(trimmedID) for profile \(profile.name)",
+                output: list.output
+            )
+        }
+        guard let device else {
+            throw XCStewardError.invalidConfiguration(
+                "Configured simulator \(trimmedID) from \(source) for profile \(profile.name) was not found by `xcrun simctl list devices --json`; refusing to fall back to another simulator"
+            )
+        }
+        guard device.isAvailableForUse else {
+            throw XCStewardError.invalidConfiguration(
+                "Configured simulator \(trimmedID) from \(source) for profile \(profile.name) is unavailable according to `xcrun simctl list devices --json`; refusing to mutate simulator state"
+            )
+        }
+    }
+
     func createManagedSimulator(_ managed: ManagedSimulator, context: ToolExecutionContext) throws -> String {
         let profile = context.profile
+        let references = try managedSimulatorCreateReferences(managed, context: context)
         let create = try tooling.runTool(
             tool: "xcrun",
-            arguments: ["simctl", "create", managed.name, managed.deviceType, managed.runtime],
+            arguments: ["simctl", "create", managed.name, references.deviceType, references.runtime],
             timeout: profile.timeouts.boot,
             context: context
         )
         try tooling.throwIfCanceled(create, context: context)
         if create.exitCode != 0 || create.timedOut {
-            throw tooling.commandFailed("Unable to create managed simulator '\(managed.name)'", output: create.output)
+            throw tooling.commandFailed(
+                "Unable to create managed simulator '\(managed.name)' using device type '\(references.deviceType)' and runtime '\(references.runtime)'",
+                output: create.output
+            )
         }
         if let created = parseCreatedSimulatorID(from: create.output) {
             return created
         }
         throw tooling.commandFailed("Unable to create managed simulator '\(managed.name)': expected a single simulator UDID in simctl create output", output: create.output)
+    }
+
+    private func managedSimulatorCreateReferences(
+        _ managed: ManagedSimulator,
+        context: ToolExecutionContext
+    ) throws -> ManagedSimulatorCreateReferences {
+        let deviceType = try managedSimulatorCreateDeviceTypeReference(managed, context: context)
+        let runtime = try managedSimulatorCreateRuntimeReference(managed, context: context)
+        return ManagedSimulatorCreateReferences(deviceType: deviceType, runtime: runtime)
+    }
+
+    private func managedSimulatorCreateDeviceTypeReference(
+        _ managed: ManagedSimulator,
+        context: ToolExecutionContext
+    ) throws -> String {
+        let configured = managed.deviceType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isCoreSimulatorIdentifier(configured, prefix: "com.apple.CoreSimulator.SimDeviceType.") {
+            return configured
+        }
+
+        let list = try tooling.runTool(
+            tool: "xcrun",
+            arguments: ["simctl", "list", "devicetypes", "--json"],
+            timeout: context.profile.timeouts.boot,
+            context: context
+        )
+        try tooling.throwIfCanceled(list, context: context)
+        if list.exitCode != 0 || list.timedOut {
+            throw tooling.commandFailed("Unable to list Simulator device types for managed simulator '\(managed.name)'", output: list.output)
+        }
+
+        let deviceTypes: SimctlDeviceTypeList
+        do {
+            deviceTypes = try JSONDecoder().decode(SimctlDeviceTypeList.self, from: Data(list.output.utf8))
+        } catch {
+            throw tooling.commandFailed("Unable to parse Simulator device type list for managed simulator '\(managed.name)'", output: list.output)
+        }
+
+        if let match = deviceTypes.devicetypes.first(where: { deviceTypeProbe($0, matches: configured) }),
+           let identifier = trimmedNonEmpty(match.identifier) {
+            return identifier
+        }
+
+        throw XCStewardError.invalidConfiguration(
+            "Managed simulator '\(managed.name)' references unknown Simulator device type '\(configured)'; `xcrun simctl list devicetypes --json` did not contain a matching identifier or name"
+        )
+    }
+
+    private func managedSimulatorCreateRuntimeReference(
+        _ managed: ManagedSimulator,
+        context: ToolExecutionContext
+    ) throws -> String {
+        let configured = managed.runtime.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isCoreSimulatorIdentifier(configured, prefix: "com.apple.CoreSimulator.SimRuntime.") {
+            return configured
+        }
+
+        let list = try tooling.runTool(
+            tool: "xcrun",
+            arguments: ["simctl", "list", "runtimes", "--json"],
+            timeout: context.profile.timeouts.boot,
+            context: context
+        )
+        try tooling.throwIfCanceled(list, context: context)
+        if list.exitCode != 0 || list.timedOut {
+            throw tooling.commandFailed("Unable to list Simulator runtimes for managed simulator '\(managed.name)'", output: list.output)
+        }
+
+        let runtimes: CoreSimulatorRuntimeListProbe
+        do {
+            runtimes = try JSONDecoder().decode(CoreSimulatorRuntimeListProbe.self, from: Data(list.output.utf8))
+        } catch {
+            throw tooling.commandFailed("Unable to parse Simulator runtime list for managed simulator '\(managed.name)'", output: list.output)
+        }
+
+        if let match = runtimes.runtimes.first(where: { $0.isAvailable && runtimeProbe($0, matches: configured) }),
+           let identifier = trimmedNonEmpty(match.identifier) {
+            return identifier
+        }
+        if runtimes.runtimes.contains(where: { runtimeProbe($0, matches: configured) }) {
+            throw XCStewardError.invalidConfiguration(
+                "Managed simulator '\(managed.name)' references unavailable Simulator runtime '\(configured)'; refusing to create a simulator on an unavailable runtime"
+            )
+        }
+
+        throw XCStewardError.invalidConfiguration(
+            "Managed simulator '\(managed.name)' references unknown Simulator runtime '\(configured)'; `xcrun simctl list runtimes --json` did not contain a matching available runtime"
+        )
     }
 
     private func resolveManagedSimulator(_ managed: ManagedSimulator, context: ToolExecutionContext) throws -> String {
@@ -332,7 +478,7 @@ final class SimulatorLifecycle: @unchecked Sendable {
         )
         try tooling.throwIfCanceled(boot, context: context)
         if boot.exitCode != 0 && !simctlOutput(boot.output, indicatesCurrentState: .booted) {
-            throw XCStewardError.commandFailed("Unable to boot simulator \(simulatorID)")
+            throw tooling.commandFailed("Unable to boot simulator \(simulatorID)", output: boot.output)
         }
         return boot
     }
@@ -410,10 +556,56 @@ final class SimulatorLifecycle: @unchecked Sendable {
         return nil
     }
 
+    private func simulatorDevice(withUDID udid: String, in output: String) throws -> SimctlDevice? {
+        let data = Data(output.utf8)
+        let list = try JSONDecoder().decode(SimctlDeviceList.self, from: data)
+        return list.devices
+            .flatMap(\.value)
+            .first { device in
+                device.udid?.trimmingCharacters(in: .whitespacesAndNewlines) == udid
+            }
+    }
+
     private func preferredManagedSimulatorCandidate(
         in candidates: [ManagedSimulatorCandidate]
     ) -> ManagedSimulatorCandidate? {
         candidates.first(where: \.hasKnownMatchingDeviceType) ?? candidates.first
+    }
+
+    private func deviceTypeProbe(_ deviceType: SimctlDeviceType, matches configured: String) -> Bool {
+        if let identifier = trimmedNonEmpty(deviceType.identifier),
+           CoreSimulatorDeviceType.matches(identifier, configured) {
+            return true
+        }
+        if let name = trimmedNonEmpty(deviceType.name),
+           CoreSimulatorDeviceType.matches(name, configured) {
+            return true
+        }
+        return false
+    }
+
+    private func runtimeProbe(_ runtime: CoreSimulatorRuntimeProbe, matches configured: String) -> Bool {
+        if let identifier = trimmedNonEmpty(runtime.identifier),
+           CoreSimulatorRuntime.matches(identifier, configured) {
+            return true
+        }
+        if let name = trimmedNonEmpty(runtime.name),
+           CoreSimulatorRuntime.matches(name, configured) {
+            return true
+        }
+        return false
+    }
+
+    private func isCoreSimulatorIdentifier(_ value: String, prefix: String) -> Bool {
+        value.lowercased().hasPrefix(prefix.lowercased())
+    }
+
+    private func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private func simulatorPrivacyArguments(
@@ -473,6 +665,20 @@ final class SimulatorLifecycle: @unchecked Sendable {
         return true
     }
 
+}
+
+private struct ManagedSimulatorCreateReferences {
+    var deviceType: String
+    var runtime: String
+}
+
+private struct SimctlDeviceTypeList: Decodable {
+    var devicetypes: [SimctlDeviceType]
+}
+
+private struct SimctlDeviceType: Decodable {
+    var name: String?
+    var identifier: String?
 }
 
 private struct SimctlDeviceList: Decodable {

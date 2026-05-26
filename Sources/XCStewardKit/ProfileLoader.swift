@@ -28,14 +28,14 @@ public struct ProfileLoader {
     private func materializeProfile(name: String, raw: [String: [String: TOMLValue]]) throws -> ProjectProfile {
         let reader = TOMLProfileReader(raw: raw)
         let root = reader.root
-        guard root.string("repo_root") != nil,
-              root.string("scheme") != nil else {
+        guard root.values["repo_root"] != nil,
+              root.values["scheme"] != nil else {
             throw XCStewardError.invalidConfiguration("Profile \(name) is missing repo_root or scheme")
         }
         let repoRoot = try requiredRootString("repo_root", profileName: name, root: root)
         let scheme = try requiredRootString("scheme", profileName: name, root: root)
-        let projectPath = optionalRootString("project_path", root: root)
-        let workspacePath = optionalRootString("workspace_path", root: root)
+        let projectPath = try optionalRootString("project_path", profileName: name, root: root)
+        let workspacePath = try optionalRootString("workspace_path", profileName: name, root: root)
         try validateBuildContainer(
             profileName: name,
             projectPath: projectPath,
@@ -105,10 +105,10 @@ public struct ProfileLoader {
             projectPath: projectPath,
             workspacePath: workspacePath,
             scheme: scheme,
-            defaultSimulatorID: optionalRootString("default_simulator_id", root: root),
+            defaultSimulatorID: try optionalRootString("default_simulator_id", profileName: name, root: root),
             managedSimulator: managedSimulator,
-            defaultTestPlan: optionalRootString("default_test_plan", root: root),
-            allowedSimulatorIDs: trimmedRootArray("allowed_simulator_ids", root: root),
+            defaultTestPlan: try optionalRootString("default_test_plan", profileName: name, root: root),
+            allowedSimulatorIDs: try trimmedRootArray("allowed_simulator_ids", profileName: name, root: root),
             env: envValues,
             timeouts: timeouts,
             resetPolicy: resetPolicy,
@@ -131,15 +131,21 @@ public struct ProfileLoader {
         profileName: String,
         root: TOMLSectionReader
     ) throws -> String {
-        guard let value = optionalRootString(key, root: root) else {
+        guard let value = try optionalRootString(key, profileName: profileName, root: root) else {
             throw XCStewardError.invalidConfiguration("Profile \(profileName) \(key) must be a non-empty string")
         }
         return value
     }
 
-    private func optionalRootString(_ key: String, root: TOMLSectionReader) -> String? {
-        guard let value = root.string(key)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
+    private func optionalRootString(_ key: String, profileName: String, root: TOMLSectionReader) throws -> String? {
+        guard let rawValue = root.values[key] else {
+            return nil
+        }
+        guard case let .string(string) = rawValue else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(key) must be a string")
+        }
+        let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
             return nil
         }
         return value
@@ -160,8 +166,14 @@ public struct ProfileLoader {
         }
     }
 
-    private func trimmedRootArray(_ key: String, root: TOMLSectionReader) -> [String] {
-        root.array(key)
+    private func trimmedRootArray(_ key: String, profileName: String, root: TOMLSectionReader) throws -> [String] {
+        guard let rawValue = root.values[key] else {
+            return []
+        }
+        guard case let .array(values) = rawValue else {
+            throw XCStewardError.invalidConfiguration("Profile \(profileName) \(key) must be an array of strings")
+        }
+        return values
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
@@ -171,7 +183,7 @@ public struct ProfileLoader {
         var currentSection = ""
         result[currentSection] = [:]
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            let trimmed = stripInlineComment(from: String(rawLine)).trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") {
                 continue
             }
@@ -190,14 +202,41 @@ public struct ProfileLoader {
         return result
     }
 
+    private func stripInlineComment(from line: String) -> String {
+        var result = ""
+        var inString = false
+        var escaping = false
+        for character in line {
+            if escaping {
+                result.append(character)
+                escaping = false
+                continue
+            }
+            if character == "\\" {
+                result.append(character)
+                escaping = true
+                continue
+            }
+            if character == "\"" {
+                result.append(character)
+                inString.toggle()
+                continue
+            }
+            if character == "#", !inString {
+                break
+            }
+            result.append(character)
+        }
+        return result
+    }
+
     private func parseValue(_ raw: String) throws -> TOMLValue {
         if raw.hasPrefix("\""), raw.hasSuffix("\"") {
             return .string(String(raw.dropFirst().dropLast()))
         }
         if raw.hasPrefix("["), raw.hasSuffix("]") {
             let inner = raw.dropFirst().dropLast()
-            let values = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }.filter { !$0.isEmpty }
-            return .array(values)
+            return .array(try parseStringArray(inner))
         }
         if raw == "true" || raw == "false" {
             return .bool(raw == "true")
@@ -206,5 +245,67 @@ public struct ProfileLoader {
             return .integer(integer)
         }
         throw XCStewardError.invalidConfiguration("Unsupported TOML value: \(raw)")
+    }
+
+    private func parseStringArray(_ inner: Substring) throws -> [String] {
+        let text = String(inner)
+        var values: [String] = []
+        var index = text.startIndex
+
+        func skipWhitespace() {
+            while index < text.endIndex, text[index].isWhitespace {
+                index = text.index(after: index)
+            }
+        }
+
+        skipWhitespace()
+        while index < text.endIndex {
+            guard text[index] == "\"" else {
+                throw XCStewardError.invalidConfiguration("TOML arrays must contain quoted strings")
+            }
+            index = text.index(after: index)
+
+            var value = ""
+            var escaping = false
+            var closed = false
+            while index < text.endIndex {
+                let character = text[index]
+                if escaping {
+                    value.append(character)
+                    escaping = false
+                    index = text.index(after: index)
+                    continue
+                }
+                if character == "\\" {
+                    value.append(character)
+                    escaping = true
+                    index = text.index(after: index)
+                    continue
+                }
+                if character == "\"" {
+                    closed = true
+                    index = text.index(after: index)
+                    break
+                }
+                value.append(character)
+                index = text.index(after: index)
+            }
+            guard closed else {
+                throw XCStewardError.invalidConfiguration("Unterminated TOML string in array")
+            }
+            values.append(value)
+
+            skipWhitespace()
+            guard index < text.endIndex else {
+                break
+            }
+            guard text[index] == "," else {
+                throw XCStewardError.invalidConfiguration("TOML array entries must be separated by commas")
+            }
+            index = text.index(after: index)
+            skipWhitespace()
+        }
+
+        return values
     }
 }

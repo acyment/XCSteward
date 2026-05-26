@@ -172,8 +172,8 @@ struct CleanupService {
     }
 
     private func cleanupJobDirectoryIsUnderJobsRoot(_ path: String) -> Bool {
-        let root = environment.paths.jobsRoot.standardizedFileURL.path
-        let candidate = URL(fileURLWithPath: path).standardizedFileURL.path
+        let root = environment.paths.jobsRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
         return candidate == root || candidate.hasPrefix(root + "/")
     }
 
@@ -181,18 +181,21 @@ struct CleanupService {
         let manager = FileManager.default
         guard let enumerator = manager.enumerator(
             at: url,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            includingPropertiesForKeys: [.fileSizeKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey, .isRegularFileKey],
             options: []
         ) else {
             return nil
         }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+            guard let values = try? fileURL.resourceValues(
+                forKeys: [.fileSizeKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey, .isRegularFileKey]
+            ),
                   values.isRegularFile == true else {
                 continue
             }
-            total += Int64(values.fileSize ?? 0)
+            let allocatedSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
+            total += Int64(allocatedSize)
         }
         return total
     }

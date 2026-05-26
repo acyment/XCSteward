@@ -1,8 +1,8 @@
 repo_root = "/Users/acyment/dev/lernit-mvp.codex"
 project_path = "ios-native/Lernit.xcodeproj"
 scheme = "Lernit"
-default_simulator_id = "EE332C90-8E72-4468-8DC3-3A0D2DD7BCCB"
-allowed_simulator_ids = ["EE332C90-8E72-4468-8DC3-3A0D2DD7BCCB"]
+default_simulator_id = "CBB8584A-F555-4C67-B700-6F858ACAE0E8"
+allowed_simulator_ids = ["CBB8584A-F555-4C67-B700-6F858ACAE0E8"]
 
 [timeouts]
 boot = 30

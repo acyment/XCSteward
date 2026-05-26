@@ -6,7 +6,7 @@ default_test_plan = "Stable"
 [managed_simulator]
 name = "Publiqueitor Test iPhone 17 Pro"
 device_type = "iPhone 17 Pro"
-runtime = "iOS 26.4"
+runtime = "iOS 26.5"
 
 [timeouts]
 boot = 30

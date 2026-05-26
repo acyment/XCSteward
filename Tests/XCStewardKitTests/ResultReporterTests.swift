@@ -40,6 +40,15 @@ final class ResultReporterTests: XCTestCase {
         XCTAssertEqual(timings.map(\.durationSeconds), [2.5, 1.25])
     }
 
+    func testParsesOneSecondTimingSamplesWithoutTreatingThemAsBooleans() throws {
+        let samples = try XCResultParser().testTimingSamples(
+            from: Data(#"{"tests":[{"identifier":"DemoTests/FooTests/testA","duration":1.0},{"identifier":"DemoTests/FooTests/testB","duration":true}]}"#.utf8)
+        )
+
+        XCTAssertEqual(samples.map(\.identifier), ["DemoTests/FooTests/testA"])
+        XCTAssertEqual(samples.map(\.durationSeconds), [1.0])
+    }
+
     func testWritesJUnitReport() throws {
         let temp = try makeTempDirectory()
         let output = temp.appendingPathComponent("junit.xml")
@@ -98,7 +107,10 @@ final class ResultReporterTests: XCTestCase {
             summaryLine: "Tests succeeded",
             metadata: ["source": "test"]
         )
-        let runner = StubToolRunner { _, arguments in
+        let runner = StubToolRunner { tool, arguments in
+            if tool == "xcrun", arguments == ["--find", "xcodebuild"] {
+                return ToolResult(exitCode: 0, output: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n", timedOut: false)
+            }
             if arguments == ["-help"] {
                 return ToolResult(exitCode: 0, output: "xcodebuild help text", timedOut: false)
             }
@@ -117,7 +129,13 @@ final class ResultReporterTests: XCTestCase {
         let metadata = try XCTUnwrap(parseJSON(String(contentsOf: paths.runMetadata)) as? [String: Any])
         XCTAssertEqual(metadata["job_id"] as? String, "job-123")
         XCTAssertEqual(metadata["simulator_id"] as? String, "SIM-123")
+        XCTAssertEqual((metadata["exit_code"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual(metadata["timed_out"] as? Bool, false)
+        XCTAssertEqual(metadata["canceled"] as? Bool, false)
         XCTAssertTrue((metadata["xcode_version"] as? String)?.contains("Xcode 16.4") == true)
+        XCTAssertEqual(metadata["xcodebuild_path"] as? String, "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild")
+        XCTAssertEqual(metadata["derived_data_path"] as? String, paths.derivedData.path)
+        XCTAssertEqual(metadata["summary_path"] as? String, paths.summary.path)
         let helpPath = try XCTUnwrap(metadata["xcodebuild_help_path"] as? String)
         XCTAssertEqual(try String(contentsOfFile: helpPath), "xcodebuild help text")
         let requestMetadata = try XCTUnwrap(metadata["request"] as? [String: Any])
@@ -153,7 +171,13 @@ final class ResultReporterTests: XCTestCase {
             metadata: [:]
         )
         var healthyXcodeProbes = false
-        let runner = StubToolRunner { _, arguments in
+        let runner = StubToolRunner { tool, arguments in
+            if tool == "xcrun", arguments == ["--find", "xcodebuild"] {
+                if healthyXcodeProbes {
+                    return ToolResult(exitCode: 0, output: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n", timedOut: false)
+                }
+                return ToolResult(exitCode: 72, output: "xcodebuild not found", timedOut: false)
+            }
             if arguments.contains("summary") {
                 return ToolResult(exitCode: 0, output: "not json", timedOut: false)
             }
@@ -189,6 +213,7 @@ final class ResultReporterTests: XCTestCase {
             "xcresulttool.summary",
             "xcresulttool.tests",
             "xcodebuild.help",
+            "xcodebuild.path",
             "xcodebuild.version",
         ])
         let helpWarning = try XCTUnwrap(warnings.first { ($0["source"] as? String) == "xcodebuild.help" })
@@ -209,6 +234,63 @@ final class ResultReporterTests: XCTestCase {
 
         let secondMetadata = try XCTUnwrap(parseJSON(String(contentsOf: secondPaths.runMetadata)) as? [String: Any])
         XCTAssertEqual((secondMetadata["probe_warnings"] as? [[String: Any]])?.count, 0)
+    }
+
+    func testRetriesTimedOutXcodebuildHelpProbeBeforeRecordingWarning() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let request = reporterRequest()
+        let job = reporterJob(request: request, directory: temp.appendingPathComponent("job"))
+        let paths = ExecutionPaths(job: job)
+        try paths.createDirectories(using: LocalFileSystem())
+        let profile = reporterProfile(repoRoot: temp.appendingPathComponent("repo").path)
+        let summary = JobSummary(
+            jobID: job.id,
+            project: job.project,
+            state: .succeeded,
+            resultClass: .success,
+            exitCode: 0,
+            submittedAt: 1,
+            startedAt: 2,
+            finishedAt: 5,
+            durationSeconds: 3,
+            testPlan: nil,
+            onlyTesting: [],
+            simulatorID: "SIM-123",
+            counts: JobCounts(testsRun: 1, testsFailed: 0, testsSkipped: 0),
+            artifacts: paths.artifacts(fileSystem: LocalFileSystem()),
+            summaryLine: "Tests succeeded",
+            metadata: [:]
+        )
+        var helpProbeTimeouts: [TimeInterval?] = []
+        let runner = StubToolRunner { tool, arguments, timeout in
+            if tool == "xcrun", arguments == ["--find", "xcodebuild"] {
+                return ToolResult(exitCode: 0, output: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n", timedOut: false)
+            }
+            if arguments == ["-help"] {
+                helpProbeTimeouts.append(timeout)
+                if helpProbeTimeouts.count == 1 {
+                    return ToolResult(exitCode: 143, output: "", timedOut: true)
+                }
+                return ToolResult(exitCode: 0, output: "retried help text", timedOut: false)
+            }
+            if arguments == ["-version"] {
+                return ToolResult(exitCode: 0, output: "Xcode 16.4\nBuild version 16F6\n", timedOut: false)
+            }
+            return ToolResult(exitCode: 1, output: "", timedOut: false)
+        }
+        let reporter = ResultReporter(environment: AppEnvironment(
+            paths: AppPaths(stateRoot: stateRoot),
+            toolRunner: runner
+        ))
+
+        try reporter.writeRunMetadata(summary: summary, profile: profile, request: request, paths: paths)
+
+        let metadata = try XCTUnwrap(parseJSON(String(contentsOf: paths.runMetadata)) as? [String: Any])
+        XCTAssertEqual(helpProbeTimeouts, [5, 30])
+        let helpPath = try XCTUnwrap(metadata["xcodebuild_help_path"] as? String)
+        XCTAssertEqual(try String(contentsOfFile: helpPath), "retried help text")
+        XCTAssertEqual((metadata["probe_warnings"] as? [[String: Any]])?.count, 0)
     }
 
     func testWritesManualShardDiagnostics() throws {
@@ -260,9 +342,15 @@ final class ResultReporterTests: XCTestCase {
 }
 
 private final class StubToolRunner: ToolRunning {
-    private let handler: (String, [String]) -> ToolResult
+    private let handler: (String, [String], TimeInterval?) -> ToolResult
 
     init(handler: @escaping (String, [String]) -> ToolResult) {
+        self.handler = { tool, arguments, _ in
+            handler(tool, arguments)
+        }
+    }
+
+    init(handler: @escaping (String, [String], TimeInterval?) -> ToolResult) {
         self.handler = handler
     }
 
@@ -274,7 +362,7 @@ private final class StubToolRunner: ToolRunning {
         timeout: TimeInterval?,
         processStarted: ((Int32) throws -> Void)?
     ) throws -> ToolResult {
-        handler(tool, arguments)
+        handler(tool, arguments, timeout)
     }
 }
 

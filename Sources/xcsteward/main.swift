@@ -3,8 +3,8 @@ import XCStewardKit
 
 var arguments = CommandLine.arguments
 let wantsJSON = arguments.contains("--json")
-let stateRoot = resolveStateRoot(arguments: &arguments, environment: ProcessInfo.processInfo.environment)
-var app = XCStewardApp(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+let initialStateRoot = defaultStateRoot(environment: ProcessInfo.processInfo.environment)
+var app = XCStewardApp(environment: AppEnvironment(paths: AppPaths(stateRoot: initialStateRoot)))
 
 do {
     let exitCode = try app.run(arguments: CommandLine.arguments)
@@ -53,6 +53,8 @@ private func errorCode(for error: Error) -> String {
         return "not_found"
     case .invalidConfiguration:
         return "invalid_configuration"
+    case .stateRootUnavailable:
+        return "state_root_unavailable"
     case .commandFailed:
         return "command_failed"
     case .canceled:

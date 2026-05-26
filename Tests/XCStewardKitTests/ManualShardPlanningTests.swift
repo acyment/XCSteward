@@ -137,6 +137,7 @@ final class ManualShardPlanningTests: XCTestCase {
 
         XCTAssertEqual(planner.aggregateResultClass([.success, .testFailure]), .testFailure)
         XCTAssertEqual(planner.aggregateResultClass([.testFailure, .artifactFailure]), .artifactFailure)
+        XCTAssertEqual(planner.aggregateResultClass([.buildFailure, .buildTimeout]), .buildTimeout)
         XCTAssertEqual(planner.aggregateResultClass([.internalError, .buildFailure]), .buildFailure)
         XCTAssertEqual(planner.aggregateResultClass([.success, .canceled, .buildFailure]), .canceled)
         XCTAssertEqual(planner.aggregateResultClass([.success, .success]), .success)

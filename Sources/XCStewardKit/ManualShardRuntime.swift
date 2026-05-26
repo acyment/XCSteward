@@ -90,6 +90,37 @@ extension ManualShardRuntime {
             environmentOverrides: [:]
         )
     }
+
+    func runXcodebuildTestAttempt(
+        _ attempt: XcodebuildTestAttempt,
+        context: ToolExecutionContext,
+        processStarted: ((Int32) throws -> Void)? = nil
+    ) throws -> ToolResult {
+        try prepareSimulatorPrivacy(
+            simulatorID: attempt.simulatorID,
+            logURL: attempt.logURL,
+            combinedLog: attempt.combinedLog,
+            context: context
+        )
+        try prepareResultStreamIfNeeded(for: context.profile.resultStream, path: attempt.resultStream)
+        return try runAndLog(
+            tool: "xcodebuild",
+            arguments: attempt.arguments,
+            timeout: context.profile.timeouts.test,
+            logURL: attempt.logURL,
+            combinedLog: attempt.combinedLog,
+            context: context,
+            environmentOverrides: testRunnerEnvironment(
+                context: context,
+                temporaryDirectory: attempt.temporaryDirectory,
+                phase: attempt.phase,
+                shardID: attempt.shardID,
+                shardIndex: attempt.shardIndex,
+                totalShards: attempt.totalShards
+            ),
+            processStarted: processStarted
+        )
+    }
 }
 
 extension JobExecutor: ManualShardRuntime {}

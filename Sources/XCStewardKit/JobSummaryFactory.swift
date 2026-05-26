@@ -60,6 +60,59 @@ struct JobSummaryFactory {
         )
     }
 
+    func preExecutionFailureSummary(
+        job: JobRecord,
+        error: Error,
+        resultClass: ResultClass,
+        finishedAt: Double
+    ) -> JobSummary {
+        let startedAt = job.startedAt ?? finishedAt
+        var artifacts = defaultArtifacts(jobDirectory: job.jobDirectory)
+        artifacts.xcresult = nil
+        artifacts.diagnostics = nil
+        artifacts.junit = nil
+        return JobSummary(
+            jobID: job.id,
+            project: job.project,
+            state: .failed,
+            resultClass: resultClass,
+            exitCode: nil,
+            submittedAt: job.createdAt,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            durationSeconds: finishedAt - startedAt,
+            testPlan: job.request.testPlan,
+            onlyTesting: job.request.onlyTesting,
+            simulatorID: job.simulatorID,
+            counts: nil,
+            artifacts: artifacts,
+            summaryLine: String(describing: error),
+            metadata: job.request.metadata
+        )
+    }
+
+    func interruptedSummary(job: JobRecord, reason: String, finishedAt: Double) -> JobSummary {
+        let startedAt = job.startedAt ?? finishedAt
+        return JobSummary(
+            jobID: job.id,
+            project: job.project,
+            state: .interrupted,
+            resultClass: .internalError,
+            exitCode: nil,
+            submittedAt: job.createdAt,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            durationSeconds: finishedAt - startedAt,
+            testPlan: job.request.testPlan,
+            onlyTesting: job.request.onlyTesting,
+            simulatorID: job.simulatorID,
+            counts: nil,
+            artifacts: defaultArtifacts(jobDirectory: job.jobDirectory),
+            summaryLine: "Interrupted: \(reason)",
+            metadata: job.request.metadata
+        )
+    }
+
     func fallbackSummary(job: JobRecord) -> JobSummary {
         JobSummary(
             jobID: job.id,
@@ -89,7 +142,8 @@ struct JobSummaryFactory {
             testLog: nil,
             derivedData: nil,
             diagnostics: nil,
-            junit: nil
+            junit: nil,
+            commandEvents: nil
         )
     }
 
@@ -102,7 +156,8 @@ struct JobSummaryFactory {
             testLog: root.appendingPathComponent("logs/test.log").path,
             derivedData: root.appendingPathComponent("derived-data").path,
             diagnostics: nil,
-            junit: nil
+            junit: nil,
+            commandEvents: root.appendingPathComponent("artifacts/command-events.jsonl").path
         )
     }
 }

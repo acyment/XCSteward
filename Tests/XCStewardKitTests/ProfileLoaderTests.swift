@@ -130,6 +130,212 @@ final class ProfileLoaderTests: XCTestCase {
             XCTAssertEqual(String(describing: error), "Profile missing-scheme is missing repo_root or scheme")
         }
     }
+
+    func testLoadProfileSupportsInlineCommentsOutsideStrings() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        try writeProfile(
+            """
+            # Profile comments are allowed.
+            repo_root = "\(repoRoot.path)" # root comment
+            project_path = "App#Debug.xcodeproj" # keep hash inside the string
+            scheme = "Demo # UI" # trailing comment
+            allowed_simulator_ids = ["SIM-123", "SIM#456"] # trailing array comment
+
+            [parallel] # section comment
+            max_workers = 1 # value comment
+            """,
+            named: "inline-comments",
+            stateRoot: stateRoot
+        )
+
+        let profile = try loadProfile(named: "inline-comments", stateRoot: stateRoot)
+
+        XCTAssertEqual(profile.repoRoot, repoRoot.path)
+        XCTAssertEqual(profile.projectPath, "App#Debug.xcodeproj")
+        XCTAssertEqual(profile.scheme, "Demo # UI")
+        XCTAssertEqual(profile.allowedSimulatorIDs, ["SIM-123", "SIM#456"])
+        XCTAssertEqual(profile.parallel.maxWorkers, 1)
+    }
+
+    func testLoadProfileParsesQuotedArrayValuesContainingCommas() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        try writeProfile(
+            """
+            repo_root = "\(repoRoot.path)"
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            allowed_simulator_ids = ["SIM,123", "SIM-456",]
+            """,
+            named: "array-commas",
+            stateRoot: stateRoot
+        )
+
+        let profile = try loadProfile(named: "array-commas", stateRoot: stateRoot)
+
+        XCTAssertEqual(profile.allowedSimulatorIDs, ["SIM,123", "SIM-456"])
+    }
+
+    func testLoadProfileRejectsUnquotedArrayValues() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        try writeProfile(
+            """
+            repo_root = "\(repoRoot.path)"
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            allowed_simulator_ids = [SIM-123]
+            """,
+            named: "unquoted-array",
+            stateRoot: stateRoot
+        )
+
+        XCTAssertThrowsError(try loadProfile(named: "unquoted-array", stateRoot: stateRoot)) { error in
+            XCTAssertTrue(String(describing: error).contains("TOML arrays must contain quoted strings"))
+        }
+    }
+
+    func testLoadProfileRejectsWrongTypedKnownValues() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+
+        let cases: [(name: String, body: String, expected: String)] = [
+            (
+                "root-string",
+                """
+                repo_root = 123
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+                """,
+                "repo_root must be a string"
+            ),
+            (
+                "optional-root-string",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = 123
+                scheme = "Demo"
+                """,
+                "project_path must be a string"
+            ),
+            (
+                "root-array",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+                allowed_simulator_ids = "SIM-123"
+                """,
+                "allowed_simulator_ids must be an array of strings"
+            ),
+            (
+                "parallel-integer",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [parallel]
+                max_workers = "one"
+                """,
+                "parallel.max_workers must be an integer"
+            ),
+            (
+                "parallel-bool",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [parallel]
+                exact_workers = "false"
+                """,
+                "parallel.exact_workers must be a boolean"
+            ),
+            (
+                "timeouts-integer",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [timeouts]
+                build = "fast"
+                """,
+                "timeouts.build must be an integer"
+            ),
+            (
+                "test-timeouts-bool",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [test_timeouts]
+                enabled = "yes"
+                """,
+                "test_timeouts.enabled must be a boolean"
+            ),
+            (
+                "test-retries-integer",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [test_retries]
+                iterations = "two"
+                """,
+                "test_retries.iterations must be an integer"
+            ),
+            (
+                "destination-integer",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [destination]
+                timeout = "slow"
+                """,
+                "destination.timeout must be an integer"
+            ),
+            (
+                "managed-simulator-bool",
+                """
+                repo_root = "\(repoRoot.path)"
+                project_path = "App.xcodeproj"
+                scheme = "Demo"
+
+                [managed_simulator]
+                name = "Demo"
+                device_type = "iPhone 17 Pro"
+                runtime = "iOS 26.5"
+                clone_for_shards = "yes"
+                """,
+                "managed_simulator.clone_for_shards must be a boolean"
+            ),
+        ]
+
+        for testCase in cases {
+            try writeProfile(testCase.body, named: testCase.name, stateRoot: stateRoot)
+            XCTAssertThrowsError(try loadProfile(named: testCase.name, stateRoot: stateRoot), testCase.name) { error in
+                XCTAssertTrue(
+                    String(describing: error).contains(testCase.expected),
+                    "\(testCase.name): \(error)"
+                )
+            }
+        }
+    }
 }
 
 private func loadProfile(named name: String, stateRoot: URL) throws -> ProjectProfile {
