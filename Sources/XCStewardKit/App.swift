@@ -305,7 +305,13 @@ public struct XCStewardApp {
             } catch {
                 return try failJobAfterWorkerLaunchFailure(error, job: record, store: store, json: options.json, progress: progress)
             }
-            let terminal = try waitForJob(id: jobID, store: store, timeout: options.waitTimeout, progress: progress)
+            let terminal = try waitForJob(
+                id: jobID,
+                store: store,
+                timeout: options.waitTimeout,
+                progress: progress,
+                workerExecutableURL: workerExecutableURL
+            )
             try printJob(terminal, json: options.json)
             return terminal.state == .succeeded ? 0 : 1
         }
@@ -594,12 +600,14 @@ public struct XCStewardApp {
         id: String,
         store: StateStore,
         timeout: TimeInterval,
-        progress: CLIProgressReporter
+        progress: CLIProgressReporter,
+        workerExecutableURL: URL?
     ) throws -> JobRecord {
         let deadline = Date().addingTimeInterval(timeout)
         var lastSignature: String?
         var nextHeartbeat = environment.clock.now().addingTimeInterval(5)
         while Date() < deadline {
+            try reconcileWorkerDuringWait(store: store, workerExecutableURL: workerExecutableURL)
             if let job = try store.fetchJob(id: id) {
                 let signature = [
                     job.state.rawValue,
@@ -629,6 +637,18 @@ public struct XCStewardApp {
             progress.emit("wait_timeout", job: job)
         }
         throw XCStewardError.commandFailed("Timed out waiting for job \(id)")
+    }
+
+    private func reconcileWorkerDuringWait(store: StateStore, workerExecutableURL: URL?) throws {
+        let recoveredStaleWorker = try store.recoverStaleLeaseIfNeeded()
+        let recoveredUnownedJobs = try store.recoverUnownedRunningJobs()
+        _ = try store.recoverStaleSimulatorLeases()
+        guard recoveredStaleWorker || recoveredUnownedJobs > 0 else {
+            return
+        }
+        if try store.hasQueuedJobs() {
+            try spawnWorkerIfNeeded(executableURL: workerExecutableURL)
+        }
     }
 
     private func terminalJobFromPersistedSummary(_ job: JobRecord) -> JobRecord? {

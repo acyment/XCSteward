@@ -2,6 +2,32 @@ import Foundation
 import XCTest
 
 final class ExecutionOutcomeE2ETests: XCTestCase {
+    func testPlaceholderIOSSimulatorDestinationIsNotClassifiedAsMacOSOnly() throws {
+        let e2e = try E2EScenario(scenario: .placeholderIOSSimulatorDestination)
+        try e2e.writeProfile(
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            """
+        )
+
+        let result = try e2e.submit(wait: true)
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let json = try result.jsonObject()
+        XCTAssertEqual(json["state"] as? String, "succeeded")
+        XCTAssertEqual(json["result_class"] as? String, "success")
+        let jobID = try e2e.jobID(from: json)
+        let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: e2e.jobDir(jobID).appendingPathComponent("artifacts/run-metadata.json"))) as? [String: Any])
+        let commands = try XCTUnwrap(runMetadata["commands"] as? [[String: Any]])
+        let commandLines = commands.compactMap { $0["command_line"] as? String }.joined(separator: "\n")
+        XCTAssertTrue(commandLines.contains("-showdestinations"))
+        XCTAssertTrue(commandLines.contains("simctl list devices"))
+        XCTAssertTrue(commandLines.contains("build-for-testing"))
+        XCTAssertNotEqual(json["result_class"] as? String, "unsupported_destination")
+    }
+
     func testMacOSOnlyDestinationFailsBeforeSimulatorMutation() throws {
         let e2e = try E2EScenario(scenario: .macOSOnlyDestination)
         try e2e.writeProfile(

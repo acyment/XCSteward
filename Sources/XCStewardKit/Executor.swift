@@ -378,6 +378,7 @@ final class JobExecutor: @unchecked Sendable {
             throw commandFailed("Unable to inspect runnable destinations for the configured scheme", output: result.output)
         }
         return !DoctorOutputParsers.showDestinationsOutputExposesIOSSimulator(result.output) &&
+            !DoctorOutputParsers.showDestinationsOutputExposesOnlyIOSSimulatorPlaceholder(result.output) &&
             DoctorOutputParsers.showDestinationsOutputExposesMacOSDestination(result.output)
     }
 

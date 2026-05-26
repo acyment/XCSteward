@@ -16,8 +16,8 @@ macOS 13 or newer with a Swift 6 toolchain and Xcode 16 or newer selected by
 `xcode-select`. The fake-tool test suite is the default verification path.
 Before tagging a public alpha, also run the opt-in live smoke test on the
 exact Xcode and simulator runtime you intend to support.
-The release-gate runbook is [docs/hardening-matrix.md](/Users/acyment/dev/XCSteward/docs/hardening-matrix.md).
-The public-alpha operator runbook is [docs/public-alpha.md](/Users/acyment/dev/XCSteward/docs/public-alpha.md), and live-use progress is tracked in [docs/dogfood-ledger.md](/Users/acyment/dev/XCSteward/docs/dogfood-ledger.md).
+The release-gate runbook is [docs/hardening-matrix.md](docs/hardening-matrix.md).
+The public-alpha operator runbook is [docs/public-alpha.md](docs/public-alpha.md), and live-use progress is tracked in [docs/dogfood-ledger.md](docs/dogfood-ledger.md).
 
 Keep alpha concurrency conservative. Serialized local simulator jobs are the
 default. Multi-job dispatch, manual sharding, hybrid sharding, and shared-Mac
@@ -90,7 +90,7 @@ xcsteward artifacts <job-id> --json
 xcsteward logs <job-id>
 ```
 
-Agent workflow examples are available in [Examples/agents](/Users/acyment/dev/XCSteward/Examples/agents).
+Agent workflow examples are available in [Examples/agents](Examples/agents).
 
 ## Commands
 
@@ -715,10 +715,10 @@ runtime = "iOS 26.4"
 clone_for_shards = true
 ```
 
-Sample dogfood profiles are under [Examples/profiles](/Users/acyment/dev/XCSteward/Examples/profiles).
-Agent workflow examples are under [Examples/agents](/Users/acyment/dev/XCSteward/Examples/agents).
-A minimal runnable iOS fixture is under [Examples/DemoApp](/Users/acyment/dev/XCSteward/Examples/DemoApp);
-copy [demo-app.toml.template](/Users/acyment/dev/XCSteward/Examples/profiles/demo-app.toml.template)
+Sample dogfood profiles are under [Examples/profiles](Examples/profiles).
+Agent workflow examples are under [Examples/agents](Examples/agents).
+A minimal runnable iOS fixture is under [Examples/DemoApp](Examples/DemoApp);
+copy [demo-app.toml.template](Examples/profiles/demo-app.toml.template)
 into your state root with `__XCSTEWARD_REPO_ROOT__` replaced by this repository
 path to exercise the documented `doctor` and `submit --wait --json` flow.
 

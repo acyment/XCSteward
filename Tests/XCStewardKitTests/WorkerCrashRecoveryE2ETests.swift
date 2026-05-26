@@ -4,6 +4,60 @@ import XCTest
 @testable import XCStewardKit
 
 final class WorkerCrashRecoveryE2ETests: XCTestCase {
+    func testSubmitWaitClientRecoversDeadWorkerWithoutFollowUpSubmit() throws {
+        let e2e = try E2EScenario(scenario: .workerCrashDuringTest)
+        try writeCrashRecoveryProfiles(e2e)
+
+        let waitingClient = try startCLI(
+            arguments: [
+                "submit",
+                "--state-root", e2e.stateRoot.path,
+                "--project", "demo-crash",
+                "--wait",
+                "--wait-timeout", "30",
+                "--json",
+            ],
+            environment: e2e.fakeTools.env
+        )
+        let store = try e2e.stateStore()
+        let jobAppeared = try waitUntil(timeout: 5) {
+            try !store.listJobs().isEmpty
+        }
+        XCTAssertTrue(jobAppeared)
+        let crashJobID = try XCTUnwrap(try store.listJobs().first?.id)
+
+        let testStarted = try waitUntil(timeout: 15) {
+            FileManager.default.fileExists(atPath: e2e.fakeTools.root.appendingPathComponent("worker-crash-test-started").path)
+        }
+        let testStartLog = try e2e.toolLog()
+        XCTAssertTrue(testStarted, testStartLog)
+
+        let orphanPID = try killWorkerAfterRecordedProcessStarts(e2e: e2e, jobID: crashJobID)
+        defer {
+            _ = kill(-orphanPID, SIGKILL)
+            _ = kill(orphanPID, SIGKILL)
+        }
+
+        let result = finishCLI(waitingClient)
+        XCTAssertEqual(result.status, 1, result.stderr)
+        let summary = try result.jsonObject()
+        XCTAssertEqual(summary["job_id"] as? String, crashJobID)
+        XCTAssertEqual(summary["state"] as? String, "interrupted")
+        XCTAssertEqual(summary["result_class"] as? String, "internal_error")
+        XCTAssertEqual(
+            summary["summary_line"] as? String,
+            "Interrupted: worker process exited before the job completed"
+        )
+        XCTAssertFalse(isPIDAlive(orphanPID))
+        XCTAssertNil(try store.currentLease())
+        XCTAssertTrue(try store.listSimulatorLeases().isEmpty)
+        let observedTermination = try waitUntil(timeout: 5) {
+            try e2e.toolLog().contains("orphaned test received SIGTERM")
+        }
+        let terminationLog = try e2e.toolLog()
+        XCTAssertTrue(observedTermination, terminationLog)
+    }
+
     func testWorkerRestartInterruptsBuildOrphanAndRunsQueuedWork() throws {
         let e2e = try E2EScenario(scenario: .workerCrashDuringBuild)
         try writeCrashRecoveryProfiles(e2e)
