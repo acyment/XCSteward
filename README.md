@@ -4,14 +4,7 @@
 [![macOS](https://img.shields.io/badge/platform-macOS%2013+-silver.svg)]()
 [![Version](https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg)]()
 
-```
-__   __   ____   _____ _                             _
- \ \ / /  / ___| / ____| |                           | |
-  \ V /  | |    | (___ | |_ _____      ____ _ _ __ __| |
-   > <   | |     \___ \| __/ _ \ \ /\ / / _` | '__/ _` |
-  / . \  | |___  ____) | ||  __/\ V  V / (_| | | | (_| |
- /_/ \_\  \____||_____/ \__\___| \_/\_/ \__,_|_|  \__,_|
-```
+<img alt="XCSteward" src="assets/logo.svg" width="140">
 
 **A local macOS CLI that queues, runs, and inspects iOS simulator tests —
 without simulator collisions, lost artifacts, or mystery failures.**
