@@ -15,6 +15,24 @@ serializes `xcodebuild` test jobs through a shared simulator pool, preserves
 every artifact, and surfaces structured output that both humans and AI coding
 agents can consume.
 
+### The problem
+
+iOS simulator test execution was designed for one human at a time. Point
+`xcodebuild` at a simulator, run your tests, done. But modern workflows
+use **multiple coding agents** working in parallel — one on the login flow,
+one fixing a flaky snapshot test, one upgrading a dependency. When two agents
+point `xcodebuild` at the same simulator, the simulator boots and shuts down
+under competing requests, `xcodebuild -showdestinations` returns placeholder
+only output, and neither agent gets a clean result. The "Simulator is already
+in use" race condition is not a simulator bug — it's a scheduling problem that
+raw `xcodebuild` doesn't solve.
+
+XCSteward turns that single-user execution model into a **multi-agent queue**.
+Each agent submits a job, the queue serializes access to the shared simulator
+pool, and every job runs to completion with isolated DerivedData, preserved
+artifacts, and a deterministic result. Agents no longer trip over each other's
+simulator state.
+
 ### Why XCSteward
 
 - **Stops simulator collisions.** Running `xcodebuild test` from multiple
