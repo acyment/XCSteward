@@ -13,79 +13,65 @@ __   __   ____   _____ _                             _
  /_/ \_\  \____||_____/ \__\___| \_/\_/ \__,_|_|  \__,_|
 ```
 
-> **Queue, run, and inspect iOS simulator tests — without simulator collisions,
-> lost artifacts, or mystery failures.**
->
-> A local macOS CLI that serializes `xcodebuild` test jobs through a shared
-> simulator pool, preserves every artifact, and surfaces structured output
-> that both humans and **AI coding agents** can consume.
+**A local macOS CLI that queues, runs, and inspects iOS simulator tests —
+without simulator collisions, lost artifacts, or mystery failures.**
 
-## Contents
+Built for teams running multiple coding agents against the same Mac. XCSteward
+serializes `xcodebuild` jobs through a lease-backed queue, preserves every
+artifact, and surfaces structured JSON output that both humans and agents can
+consume without parsing walls of text.
 
-- [The problem](#the-problem)
-- [What XCSteward does](#what-xcsteward-does)
-- [Install](#install)
-- [Quickstart](#quickstart)
-- [CLI usage](#cli-usage)
-- [JSON output contract](#json-output-contract)
-- [Profile configuration](#profile-configuration)
-- [Development](#development)
-- [Scope & limitations](#scope--limitations)
+**License:** Apache 2.0 · **Platform:** macOS 13+ · **Requires:** Swift 6, Xcode 16+
 
----
+## What it does
+
+- **Serializes simulator access.** Jobs queue for a shared simulator pool
+  instead of racing for the same CoreSimulator device. No more "Simulator is
+  already in use" errors or overlapping boot/shutdown cycles.
+- **Preserves evidence.** Every run keeps build logs, test logs, `.xcresult`
+  bundles, JUnit XML, a machine-readable `command-events.jsonl` timeline, and
+  job metadata. When a test fails three days ago, the evidence is still there.
+- **Speaks agent.** Structured `--json` output, streaming `--progress` events
+  on stderr, and predictable exit codes mean agents can drive it without
+  heuristic screen-scraping.
+- **Won't touch what it doesn't own.** Simulators are leased per job. State
+  outside the configured root is never deleted. Broad CoreSimulator cleanup
+  requires an explicit opt-in flag. Safety invariants are verified by a 65-row
+  hardening matrix.
+- **Handles multiple projects.** One binary, one simulator pool, one queue.
+  Define profiles for each `.xcodeproj` or `.xcworkspace` — CocoaPods, SwiftPM,
+  Flutter, React Native — and switch projects without reconfiguring devices.
 
 ## The problem
 
-iOS simulator test execution was designed for **one human at a time**.
+iOS simulator test execution was designed for one human at a time:
 
 ```bash
 xcodebuild test -destination 'platform=iOS Simulator,name=iPhone 16' ...
 ```
 
-Point it at a simulator, run your tests, done.
+Point, run, done. But modern workflows run multiple coding agents in parallel
+— one on the login flow, one fixing a flaky snapshot test, one upgrading a
+dependency. When two agents hit the same simulator:
 
-But **modern workflows run multiple coding agents in parallel** — one on the
-login flow, one fixing a flaky snapshot test, one upgrading a dependency.
-When two agents point `xcodebuild` at the same simulator at the same time:
-
-| Symptom | Root cause |
+| Symptom | Why |
 | --- | --- |
 | Simulator boots and shuts down under competing requests | Neither agent owns the device |
 | `xcodebuild -showdestinations` returns placeholder-only output | Xcode can't enumerate a busy simulator |
 | "Simulator is already in use" error | Race condition, not a simulator bug |
 | Tests pass locally but fail on CI with no evidence | No artifacts preserved, no timeline |
 
-> **This is not a simulator bug. It's a scheduling problem that raw `xcodebuild` doesn't solve.**
+> This is not a simulator bug. It's a scheduling problem that raw `xcodebuild`
+> doesn't solve.
 
-XCSteward turns that single-user model into a **multi-agent queue**:
+XCSteward turns that single-user model into a multi-agent queue:
 
 1. Each agent submits a job
 2. The queue serializes access to the shared simulator pool
-3. Every job runs to completion with **isolated DerivedData**, **preserved artifacts**, and a **deterministic result**
+3. Every job runs to completion with isolated DerivedData, preserved artifacts,
+   and a deterministic result
 
 Agents no longer trip over each other's simulator state.
-
-## What XCSteward does
-
-- **Stops simulator collisions.** Serializes jobs through a lease-backed queue —
-  no more "Simulator is already in use" errors, no overlapping boot/shutdown,
-  no surprise destination failures.
-- **Preserves evidence.** Build logs, test logs, `.xcresult` bundles, JUnit XML,
-  a machine-readable `command-events.jsonl` timeline, and job metadata are kept
-  per run. When a test fails three days ago on a CI Mac, the evidence is still
-  there.
-- **Built for agents.** Structured `--json` output, streaming `--progress` events
-  on stderr, and predictable exit codes make XCSteward safe for AI coding
-  agents to invoke without parsing human-readable walls of text.
-- **Safe by default.** Will not mutate a simulator without a job-owned lease,
-  delete state outside its configured root, or run broad CoreSimulator cleanup
-  without an explicit opt-in flag. Safety invariants are verified by a 65-row
-  hardening matrix.
-- **Multi-project from one binary.** Define profiles for each `.xcodeproj` or
-  `.xcworkspace` — CocoaPods, SwiftPM, Flutter, React Native — and dispatch
-  jobs to the same simulator pool with one CLI.
-
----
 
 ## Install
 
@@ -96,7 +82,7 @@ brew tap acyment/tap
 brew install xcsteward
 ```
 
-Verify the binary and local host setup:
+Verify:
 
 ```bash
 xcsteward --help
@@ -105,7 +91,7 @@ xcsteward doctor --json
 
 ### From source
 
-Requires a Swift 6 toolchain and Xcode 16 or newer.
+Requires Swift 6 and Xcode 16 or newer.
 
 ```bash
 git clone https://github.com/acyment/XCSteward.git
@@ -115,22 +101,18 @@ mkdir -p "$HOME/.local/bin"
 cp .build/release/xcsteward "$HOME/.local/bin/xcsteward"
 ```
 
-Add the install directory to your shell path if needed:
+Add to PATH if needed:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 The default state root is `~/Library/Application Support/XCSteward`. Override
-it per command with `--state-root <path>` or for the process environment with
-`XCSTEWARD_HOME=<path>`.
-
----
+per command with `--state-root <path>` or set `XCSTEWARD_HOME=<path>`.
 
 ## Quickstart
 
-Build and install the binary, then create one project profile under the state
-root:
+Create a project profile under the state root:
 
 ```bash
 STATE_ROOT="${XCSTEWARD_HOME:-$HOME/Library/Application Support/XCSteward}"
@@ -141,15 +123,15 @@ xcsteward doctor --project demo-app
 xcsteward submit --project demo-app --wait --json
 ```
 
-For long-running JSON commands, add `--progress` to stream compact progress
-events on stderr while stdout stays reserved for the final JSON object:
+For long-running JSON commands, add `--progress` to stream compact events on
+stderr while stdout stays reserved for the final JSON object:
 
 ```bash
 xcsteward doctor --project demo-app --json --progress
 xcsteward submit --project demo-app --wait --json --progress
 ```
 
-For a real app, replace the template with a profile that points at your repo,
+For a real app, replace the template with a profile pointing at your repo,
 scheme, and simulator UDID:
 
 ```toml
@@ -159,30 +141,24 @@ scheme = "App"
 default_simulator_id = "SIM-UDID"
 ```
 
-After a terminal job, inspect the evidence trail:
+After a terminal job, inspect the evidence:
 
 ```bash
 xcsteward artifacts <job-id> --json
 xcsteward logs <job-id>
 ```
 
-Agent workflow examples are available in [Examples/agents](Examples/agents).
+Agent workflow examples are in [Examples/agents](Examples/agents).
 
----
-
-## CLI usage
-
-Core commands:
+## Commands
 
 ```bash
-# Submit a job
+# Submit
 xcsteward submit --project <name> [--wait] [--wait-timeout 300] [--json]
-
-# Filtered submission
 xcsteward submit --project <name> --only-testing AppTests/FooTests --skip-testing AppTests/FooTests/testFlaky --wait
 xcsteward submit --project <name> --only-test-configuration Smoke --skip-test-configuration Flaky --wait
 
-# Inspect jobs
+# Inspect
 xcsteward status <job-id> [--json]
 xcsteward jobs [--json]
 xcsteward logs <job-id>
@@ -194,30 +170,21 @@ xcsteward doctor [--project <name>] [--fix] [--fix-global --dangerously-confirm-
 xcsteward cleanup [--dry-run] [--apply] [--older-than 7d] [--keep-last 20] [--max-total-size 50gb] [--json]
 ```
 
-`cleanup` is dry-run by default. It only selects terminal jobs under the
-configured `jobs/` state-root directory, keeps the newest terminal jobs, skips
-active worker or simulator leases, and refuses live process IDs. `--max-total-size`
-also selects the oldest eligible terminal jobs until managed terminal-job bytes
-fit under the budget. Use `--apply` to delete the selected job directories and
-terminal job records.
+`cleanup` is dry-run by default. It selects terminal jobs under `jobs/`, keeps
+the newest, skips active leases and live PIDs, and respects `--max-total-size`.
+Use `--apply` to delete.
 
-`doctor` reports stale worker and simulator lease records. With `--fix`, it
-removes simulator leases owned by dead XCSteward processes without touching
-active leases. Broad CoreSimulator cleanup, such as deleting unavailable
-devices, requires both `--fix-global` and the danger confirmation flag
-`--dangerously-confirm-global-coresimulator-cleanup`.
+`doctor` reports stale worker and simulator leases. `--fix` removes leases
+owned by dead XCSteward processes without touching active ones. Broad
+CoreSimulator cleanup requires `--fix-global` plus the danger confirmation flag.
 
----
+## API
 
-## JSON output contract
-
-Commands with `--json` write one JSON document to stdout when the requested
-object can be loaded. Some of those commands intentionally return a nonzero
-exit code after printing JSON, for example `status --json` for a failed job,
-`submit --wait --json` for a failed job, or `doctor --json` when a required
-check fails. When `--json` is present but the command fails before loading its
-requested object, XCSteward writes one JSON error document to stderr and leaves
-stdout empty:
+Commands with `--json` write one JSON document to stdout. Some return nonzero
+exit codes after printing JSON — for example `status --json` on a failed job
+or `doctor --json` when a required check fails. When `--json` is present but
+the command fails before loading its object, XCSteward writes one JSON error to
+stderr and leaves stdout empty:
 
 ```json
 {
@@ -228,14 +195,12 @@ stdout empty:
 }
 ```
 
-Stable command error codes are `usage`, `not_found`,
-`invalid_configuration`, `command_failed`, `canceled`, and
-`unexpected_error`.
+Stable error codes: `usage`, `not_found`, `invalid_configuration`,
+`command_failed`, `canceled`, `unexpected_error`.
 
 ### Job summary
 
-`submit --json`, `submit --wait --json`, `status --json`, and
-`cancel --json` return a job summary object:
+`submit --json`, `submit --wait --json`, `status --json`, and `cancel --json`:
 
 ```json
 {
@@ -266,16 +231,15 @@ Stable command error codes are `usage`, `not_found`,
 }
 ```
 
-Stable job states are `queued`, `running`, `succeeded`, `failed`, `canceled`,
-and `interrupted`. Stable result classes are `success`, `build_failure`,
+Stable states: `queued`, `running`, `succeeded`, `failed`, `canceled`,
+`interrupted`. Stable result classes: `success`, `build_failure`,
 `test_failure`, `test_timeout`, `runner_bootstrap_failure`,
-`artifact_failure`, `canceled`, and `internal_error`. Timestamp fields are Unix
-epoch seconds as numbers. Nullable fields are present even when the value is
-not known yet.
+`artifact_failure`, `canceled`, `internal_error`. Timestamps are Unix epoch
+seconds. Nullable fields are present even when unknown.
 
 ### Jobs list
 
-`jobs --json` returns an array of compact job objects:
+`jobs --json` returns an array of compact objects:
 
 ```json
 [
@@ -291,14 +255,12 @@ not known yet.
 ### Artifacts
 
 `artifacts --json` returns the `artifacts` object from the terminal job
-summary. Paths are absolute local filesystem paths and can be `null` when that
-artifact was not produced.
+summary. Paths are absolute local filesystem paths and can be `null` when not
+produced.
 
 ### Cleanup report
 
-`cleanup --json` returns a cleanup report. By default `dry_run` is `true`; use
-`--apply` when the selected terminal job directories and records should be
-deleted:
+`cleanup --json` returns:
 
 ```json
 {
@@ -326,10 +288,9 @@ deleted:
 }
 ```
 
-Cleanup candidate `reason` values are `age` and `size_budget`. `bytes` is the
-best-effort allocated disk usage of regular files under the job directory, with
-logical file size as a fallback when allocation metadata is unavailable.
-`max_total_bytes` is `null` when `--max-total-size` was not supplied.
+Candidate reasons: `age`, `size_budget`. `bytes` is best-effort allocated disk
+usage with logical file size as fallback. `max_total_bytes` is `null` when not
+supplied.
 
 ### Doctor report
 
@@ -352,75 +313,47 @@ logical file size as a fallback when allocation metadata is unavailable.
 }
 ```
 
-Doctor statuses are `pass`, `warn`, and `fail`. Agents should treat unknown
-future fields as additive, preserve the full JSON object in logs, and make
-control-flow decisions from `state`, `result_class`, `overall_status`,
-`dry_run`, `candidate_count`, and `deleted_count`.
+Doctor statuses: `pass`, `warn`, `fail`. Agents should treat unknown future
+fields as additive, preserve the full JSON in logs, and make control-flow
+decisions from `state`, `result_class`, `overall_status`, `dry_run`,
+`candidate_count`, and `deleted_count`.
 
 ### Environment overrides
 
-Use `--state-root <path>` to point the CLI at a specific local state directory. By default it uses `~/Library/Application Support/XCSteward`.
+Use `--state-root <path>` for a specific state directory. Default:
+`~/Library/Application Support/XCSteward`.
 
-Set `XCSTEWARD_MAX_CONCURRENT_JOBS=<n>` on the worker environment to allow the
-singleton worker process to run up to `n` queued jobs at once. The default is
-`1`. Concurrent jobs still require distinct simulator UDIDs because XCSteward
-leases each resolved simulator exclusively for the owning job.
+Set `XCSTEWARD_MAX_CONCURRENT_JOBS=<n>` to allow up to `n` queued jobs at once.
+Default is `1`. Concurrent jobs still require distinct simulator UDIDs — each
+is leased exclusively.
 
-When concurrent jobs are enabled, XCSteward writes a best-effort
-`host-health.json` snapshot under the state root and reduces dispatch
-concurrency to one job when configured health signals indicate constrained host
-capacity. Supported inputs are `XCSTEWARD_MEMORY_PRESSURE`,
-`XCSTEWARD_SAMPLE_MEMORY_PRESSURE`, `XCSTEWARD_THERMAL_STATE`,
-`XCSTEWARD_SAMPLE_THERMAL_STATE`, `XCSTEWARD_MAX_LOAD_AVERAGE`,
-`XCSTEWARD_LOAD_AVERAGE`, `XCSTEWARD_RECENT_INFRA_FAILURE_LIMIT`,
-`XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS`,
-`XCSTEWARD_MAX_BOOTED_SIMULATORS`, `XCSTEWARD_BOOTED_SIMULATOR_COUNT`,
-`XCSTEWARD_MAX_ACTIVE_SIMULATOR_LEASES`, `XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT`,
-and `XCSTEWARD_FOREIGN_ACTIVITY_POLICY`.
+When concurrency is enabled, XCSteward writes a `host-health.json` snapshot and
+reduces dispatch to one job when health signals indicate constrained capacity.
+Supported environment inputs:
 
-Recovered runner/bootstrap incidents, including shard retries that ultimately
-succeed, are counted as recent infrastructure failures for this capacity gate.
-When `XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT` is set and reached within the same
-failure window, the worker writes `draining=true` to `host-health.json` and
-stops dispatching new queued jobs until the window clears.
+| Variable | Behavior |
+| --- | --- |
+| `XCSTEWARD_MEMORY_PRESSURE` | Injected memory pressure level |
+| `XCSTEWARD_SAMPLE_MEMORY_PRESSURE` | Sample macOS `memory_pressure`; reduces dispatch on warning/serious/critical |
+| `XCSTEWARD_THERMAL_STATE` | Injected thermal state |
+| `XCSTEWARD_SAMPLE_THERMAL_STATE` | Sample `pmset -g therm`; reduces dispatch on serious/critical CPU throttling |
+| `XCSTEWARD_MAX_LOAD_AVERAGE` | Reduce dispatch when 1-minute load reaches threshold |
+| `XCSTEWARD_LOAD_AVERAGE` | Override sampled load average |
+| `XCSTEWARD_MAX_BOOTED_SIMULATORS` | Cap booted simulators |
+| `XCSTEWARD_BOOTED_SIMULATOR_COUNT` | Override booted count |
+| `XCSTEWARD_MAX_ACTIVE_SIMULATOR_LEASES` | Cap simulator lease pressure independently from job count |
+| `XCSTEWARD_FOREIGN_ACTIVITY_POLICY` | `capacity` (default), `strict`, or `ignore` for non-XCSteward xcodebuild activity |
+| `XCSTEWARD_RECENT_INFRA_FAILURE_LIMIT` + `XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS` | Drain gate |
+| `XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT` | Write `draining=true` and stop dispatch when reached |
 
-Set `XCSTEWARD_MAX_ACTIVE_SIMULATOR_LEASES` to cap simulator lease pressure
-independently from job count; active jobs are treated as reserved simulator
-slots while they are still starting.
-
-Set `XCSTEWARD_SAMPLE_MEMORY_PRESSURE=true` to sample macOS
-`memory_pressure` and reduce dispatch to one job when it reports warning,
-serious, or critical pressure. `XCSTEWARD_MEMORY_PRESSURE` can still inject an
-explicit value and takes precedence over sampling. Memory-pressure sampling is
-off by default; `host-health.json` reports the policy as
-`memory_pressure_sampling_enabled`.
-
-Set `XCSTEWARD_SAMPLE_THERMAL_STATE=true` to sample `pmset -g therm` and reduce
-dispatch to one job when CPU thermal throttling maps to serious or critical
-state. `XCSTEWARD_THERMAL_STATE` can still inject an explicit value and takes
-precedence over sampling. Thermal sampling is off by default;
-`host-health.json` reports the policy as `thermal_state_sampling_enabled`.
-
-Set `XCSTEWARD_MAX_LOAD_AVERAGE` to reduce dispatch to one job when the host's
-1-minute load average reaches that threshold. `XCSTEWARD_LOAD_AVERAGE` can
-override the sampled load average in controlled environments.
-
-`XCSTEWARD_FOREIGN_ACTIVITY_POLICY` controls how non-XCSteward
-`xcodebuild test`/`xctest` activity affects dispatch: `capacity` (default)
-reduces concurrent dispatch to one job, `strict` stops new dispatch while the
-foreign runner is active, and `ignore` disables this capacity signal.
-
----
+Recovered runner/bootstrap incidents (including shard retries that ultimately
+succeed) count as recent infrastructure failures for the capacity gate.
 
 ## Profile configuration
 
-Profiles live under:
+Profiles live under `<state-root>/projects/<name>.toml`.
 
-```text
-<state-root>/projects/<name>.toml
-```
-
-### Minimal profile
+### Minimal
 
 ```toml
 repo_root = "/absolute/path/to/repo"
@@ -429,12 +362,11 @@ scheme = "App"
 default_simulator_id = "SIM-UDID"
 ```
 
-Set exactly one of `project_path` or `workspace_path`; use
-`workspace_path = "App.xcworkspace"` for workspace-based apps. `repo_root` and
-`scheme` are required. A simulator must come from `default_simulator_id`, an
-allowed `--simulator-id` override, or a `[managed_simulator]` block.
+Set exactly one of `project_path` or `workspace_path`. `repo_root` and `scheme`
+are required. A simulator comes from `default_simulator_id`, an allowed
+`--simulator-id` override, or a `[managed_simulator]` block.
 
-Create and verify a profile:
+Create and verify:
 
 ```bash
 STATE_ROOT="${XCSTEWARD_HOME:-$HOME/Library/Application Support/XCSteward}"
@@ -456,51 +388,39 @@ allowed_simulator_ids = ["SIM-123"]
 reset_policy = "none" # none | shutdown | erase
 
 [timeouts]
-# Positive seconds.
 boot = 30
 build = 600
 test = 600
 
 [destination]
-# Optional xcodebuild destination wait cap in seconds.
 timeout = 30
 
 [coverage]
-# Optional xcodebuild code coverage override. Omit the block to let the scheme decide.
-# `enabled` must be a boolean.
 enabled = true
 
 [result_stream]
-# Optional xcodebuild result stream artifact for test runs.
-# `enabled` must be a boolean.
 enabled = false
 
 [result_bundle]
-# Optional xcodebuild result bundle format version for test result bundles.
-# `version` must be a positive integer.
 version = 3
 
 [parallel]
 mode = "xcode-managed"
 max_workers = 1
 exact_workers = false
-# shard_count is only used by mode = "manual-shards" or "hybrid"
 shard_count = 1
 
 [ports]
-# Optional per-run/per-shard port range exposed to test runners.
 base = 51000
 count = 16
 stride = 100
 
 [test_timeouts]
-# Defaults shown here. Set enabled = false to let the scheme decide.
 enabled = true
 default_execution_time_allowance = 120
 maximum_execution_time_allowance = 600
 
 [test_retries]
-# Opt-in Xcode-managed flaky-test retry controls.
 enabled = false
 iterations = 1
 retry_tests_on_failure = true
@@ -508,43 +428,34 @@ run_tests_until_failure = false
 relaunch_between_iterations = false
 
 [test_diagnostics]
-# Optional Xcode result-bundle diagnostics collection policy.
-collect = "on-failure" # on-failure | never
+collect = "on-failure"
 
 [test_products]
-# Opt in to materializing job-scoped .xctestproducts during build-for-testing.
-# `enabled` and `use_for_testing` must be booleans.
 enabled = false
-# Also pass -testProductsPath to test-without-building instead of -xctestrun.
 use_for_testing = false
 
 [privacy]
-# Optional simctl privacy setup for each leased simulator before tests run.
-# `grant`, `revoke`, and `reset` must be arrays of service or service:bundle entries.
 reset = ["all"]
 grant = ["photos:com.example.App", "location:com.example.App"]
 revoke = ["microphone:com.example.App"]
 
 [env]
-# Environment values must be strings and are passed through verbatim.
 FOO = "bar"
 ```
 
 ### Parallel modes
 
-Parallel defaults are `mode = "xcode-managed"`, `max_workers = 1`, and
-`exact_workers = false`. In this mode XCSteward lets Xcode manage simulator
-test workers during `test-without-building`. While a job is running, XCSteward
-records an exclusive lease for the resolved simulator UDID and releases it when
-the job reaches a terminal state; stale leases owned by dead XCSteward
-processes are recovered before the next job runs. Active jobs refresh their
-worker and simulator lease heartbeats while long-running build/test commands
-are in flight, so lease state remains useful for monitoring during slow jobs.
-Use higher `max_workers` values only after a live smoke job proves that Xcode's
-clone simulator launches are stable on the host. Targeted single-method
-submissions are serialized automatically unless `exact_workers = true`.
+Defaults: `mode = "xcode-managed"`, `max_workers = 1`, `exact_workers = false`.
+XCSteward lets Xcode manage test workers during `test-without-building`.
+Each job records an exclusive simulator lease; stale leases from dead processes
+are recovered before the next job. Active jobs refresh lease heartbeats during
+long build/test phases.
 
-Use serial mode to keep the previous single-worker behavior:
+Use higher `max_workers` only after a live smoke job proves Xcode clone
+simulator launches are stable on the host. Targeted single-method submissions
+serialize automatically unless `exact_workers = true`.
+
+Serial mode for single-worker behavior:
 
 ```toml
 [parallel]
@@ -553,39 +464,27 @@ mode = "serial"
 
 ### Manual sharding
 
-Manual sharding is opt-in. XCSteward still builds once, then enumerates tests
-from the generated `.xctestrun` or configured `.xctestproducts` path and runs
-`shard_count` concurrent `test-without-building` invocations with Xcode inner
-parallelism disabled. Each non-empty shard needs its own simulator UDID from
-`default_simulator_id`, `allowed_simulator_ids`, or `--simulator-id`, unless
-`[managed_simulator]` enables `clone_for_shards`. With clone provisioning
-enabled, XCSteward shuts down the managed template after enumeration, creates
-temporary `simctl clone` simulators for missing shard slots, leases them, and
-deletes only those temporary clones after the job. Each shard writes its own
-`.xcresult` under the job artifacts directory. The job summary keeps the
-existing schema and points `artifacts.diagnostics` at
-`artifacts/combined-summary.json`. XCSteward also writes the raw per-shard list
-to `artifacts/shards.json` for compatibility. Every completed test run also
-writes `artifacts/junit.xml` and exposes it as `artifacts.junit` for CI systems
-that expect JUnit XML; `.xcresult` bundles remain the source of truth.
+Opt-in. XCSteward builds once, enumerates tests, then runs `shard_count`
+concurrent `test-without-building` invocations with Xcode inner parallelism
+disabled. Each non-empty shard needs its own simulator UDID unless
+`[managed_simulator]` enables `clone_for_shards`.
 
-When all shards succeed, XCSteward also attempts a best-effort
-`xcresulttool merge` into `artifacts/merged.xcresult` and exposes it through
-`artifacts.xcresult`; per-shard bundles remain the source of truth if merge is
-unavailable or fails.
+With clone provisioning, XCSteward shuts down the managed template after
+enumeration, creates temporary `simctl clone` simulators for missing shard
+slots, leases them, and deletes only those temporary clones after the job.
+Each shard writes its own `.xcresult`.
 
-After a successful shard run, XCSteward records per-test duration samples from
-`xcresulttool get test-results tests` when available; later manual and hybrid
-runs use those timings to balance shards. If no timing history exists yet,
-XCSteward falls back to deterministic round-robin splitting.
+When all shards succeed, XCSteward attempts best-effort `xcresulttool merge`
+into `artifacts/merged.xcresult`. Per-shard bundles remain the source of truth
+if merge fails.
 
-If a shard fails before XCTest really gets going, XCSteward retries that shard
-once after `simctl shutdown`, `simctl erase`, and a fresh boot of the leased
-simulator. The per-shard diagnostics include `attempts`, `retry_reason`, and
-`simulator_diagnostics` paths captured with `simctl diagnose -l`. Retryable
-first-attempt shard `.xcresult` bundles are preserved under
-`artifacts/shards/<shard-id>/attempts/attempt-001/` and linked from each
-retried shard's `attempt_artifacts`.
+After a successful shard run, XCSteward records per-test duration samples;
+later manual and hybrid runs use those timings to balance shards. If no timing
+history exists, it falls back to round-robin splitting.
+
+If a shard fails before XCTest starts, XCSteward retries once after
+`simctl shutdown`, `simctl erase`, and fresh boot. Per-shard diagnostics
+include `attempts`, `retry_reason`, and `simulator_diagnostics` paths.
 
 ```toml
 default_simulator_id = "SIM-123"
@@ -598,9 +497,7 @@ shard_count = 2
 
 ### Hybrid mode
 
-Hybrid mode uses the same outer sharding model, but each shard keeps
-Xcode-managed inner parallelism enabled using `max_workers` and
-`exact_workers`:
+Outer sharding with Xcode-managed inner parallelism:
 
 ```toml
 [parallel]
@@ -611,8 +508,6 @@ exact_workers = false
 ```
 
 ### Managed simulator
-
-Managed simulator example:
 
 ```toml
 repo_root = "/absolute/path/to/repo"
@@ -626,168 +521,98 @@ runtime = "iOS 26.4"
 clone_for_shards = true
 ```
 
-### Profile reference
+### Reference
 
-Set `reset_policy = "shutdown"` or `reset_policy = "erase"` to clean only the
-simulator UDIDs leased by XCSteward after a job. The default `none` leaves the
-leased simulator state untouched after successful jobs; retry recovery still
-uses targeted shutdown/erase when an infrastructure failure requires it.
-
-The optional `[destination]` block passes `-destination-timeout <seconds>` to
-destination-bearing `xcodebuild` invocations: `build-for-testing`,
-`test-without-building`, manual shard runs, and test enumeration. Omit the
-block to leave Xcode's default destination timeout unchanged.
-
-The optional `[coverage]` block passes `-enableCodeCoverage YES|NO` to
-`build-for-testing` and every `test-without-building` invocation, including
-manual and hybrid shards. Omit the block to leave the scheme's code coverage
-setting unchanged. Because coverage instrumentation is decided during build,
-XCSteward applies the same override to both phases.
-
-The optional `[result_stream]` block enables xcodebuild result-stream artifacts
-for `test-without-building`. When `enabled = true`, XCSteward pre-creates the
-stream file required by xcodebuild and passes `-resultStreamPath`. Non-sharded
-runs write `artifacts/result-stream.json` and link it from
-`run-metadata.json`; manual and hybrid shards write one `result-stream.json`
-inside each shard artifact directory and link it from `shards.json`.
-
-The optional `[result_bundle]` block passes `-resultBundleVersion <version>` to
-every `test-without-building` invocation that writes an `.xcresult`, including
-manual and hybrid shards. Omit the block to leave Xcode's default result bundle
-format unchanged.
-
-Every `xcodebuild` invocation gets a run-scoped `TMPDIR` under the job
-directory plus `XCSTEWARD_JOB_ID`, `XCSTEWARD_PROJECT`, and
-`XCSTEWARD_PHASE`. Test and enumeration invocations also receive
-`TEST_RUNNER_XCSTEWARD_JOB_ID`, `TEST_RUNNER_XCSTEWARD_PROJECT`,
-`TEST_RUNNER_XCSTEWARD_PHASE`, and `TEST_RUNNER_XCSTEWARD_MODE`, which
-`xcodebuild` forwards to the test runner through the supported
-`TEST_RUNNER_` environment mechanism. Manual and hybrid shards additionally get
-`XCSTEWARD_SHARD_ID`, `XCSTEWARD_SHARD_INDEX`, `XCSTEWARD_TOTAL_SHARDS`, and
-matching `TEST_RUNNER_` variables, with a separate shard `TMPDIR` for each
-`test-without-building` process.
-
-Use repeatable `--only-testing <identifier>` and `--skip-testing <identifier>`
-submit options to pass Xcode test selection filters. Xcode-managed runs receive
-both `-only-testing:` and `-skip-testing:` flags directly. Manual and hybrid
-shards use `--only-testing` as the explicit shard input; when no
-`--only-testing` filters are provided, XCSteward filters enumerated tests with
-`--skip-testing` before splitting shards, then still passes the skip filters to
-each shard invocation.
-
-Use repeatable `--only-test-configuration <name>` and
-`--skip-test-configuration <name>` submit options to pass test-plan
-configuration filters through to Xcode. XCSteward applies those filters to
-test enumeration and to every `test-without-building` invocation, including
-manual and hybrid shard runs.
-
-The optional `[ports]` block reserves deterministic port ranges for tests that
-launch local mock servers. XCSteward does not bind those ports itself; it
-injects `XCSTEWARD_PORT_RANGE_*` and matching `TEST_RUNNER_` variables so the
-test runner can choose ports from the assigned range. Non-sharded test runs use
-range index `0`. Manual and hybrid shards use `base + shard_index * stride`,
-and the loader validates that all configured shard ranges fit within TCP port
-65535. Use different base ranges for profiles that may run concurrently.
-
-The optional `[privacy]` block applies `xcrun simctl privacy` operations to
-each simulator UDID leased by XCSteward before test execution. Use
-`grant = ["service:bundle.identifier"]` and
-`revoke = ["service:bundle.identifier"]`; use `reset = ["service"]` or
-`reset = ["service:bundle.identifier"]`.
-
-Supported services match `simctl privacy`: `all`, `calendar`,
-`contacts-limited`, `contacts`, `location`, `location-always`, `photos-add`,
-`photos`, `media-library`, `microphone`, `motion`, `reminders`, and `siri`.
-Manual and hybrid shards apply the same privacy policy independently to every
-shard simulator, including temporary managed clones.
-
-XCSteward enables Xcode's per-test execution allowance flags by default for
-`test-without-building`: `-test-timeouts-enabled YES`,
-`-default-test-execution-time-allowance 120`, and
-`-maximum-test-execution-time-allowance 600`. Configure `[test_timeouts]` to
-change those values, or set `enabled = false` to pass
-`-test-timeouts-enabled NO` without allowance values.
-
-The optional `[test_retries]` block exposes Xcode's native test repetition
-flags for suites that intentionally opt in to flaky-test handling. When enabled,
-XCSteward passes `-test-iterations <iterations>` plus either
-`-retry-tests-on-failure` or `-run-tests-until-failure`. These retries are
-separate from XCSteward's infrastructure retry path; runner/bootstrap failures
-are still classified and retried by XCSteward before test retry policy matters.
-`retry_tests_on_failure` and `run_tests_until_failure` are mutually exclusive.
-Set `relaunch_between_iterations = true` to pass
-`-test-repetition-relaunch-enabled YES`; set it to `false` to pass
-`-test-repetition-relaunch-enabled NO`. If omitted, XCSteward leaves Xcode's
-default repetition process behavior unchanged.
-
-The optional `[test_diagnostics]` block controls Xcode's result-bundle
-diagnostic collection policy. Set `collect = "on-failure"` to pass
-`-collect-test-diagnostics on-failure`, or `collect = "never"` to pass
-`-collect-test-diagnostics never`. If the block is omitted, XCSteward leaves
-the scheme/toolchain default unchanged. Manual and hybrid shards receive the
-same diagnostic collection flag as non-sharded test runs.
-
-Every terminal job writes `artifacts/run-metadata.json` as an audit manifest.
-It includes the job state, result classification, simulator UDID, selected
-Xcode version, macOS version, request filters, profile policy, and artifact
-paths. This file is intentionally separate from `JobSummary` so existing
-summary consumers do not need to migrate.
-
-When XCSteward retries an xcode-managed runner/bootstrap failure, it preserves
-the retryable first-attempt `.xcresult` under
-`artifacts/attempts/test-attempt-001/` and records it in `run-metadata.json`.
-XCSteward also snapshots `xcodebuild -help` into
-`artifacts/xcodebuild-help.txt` on a best-effort basis and links it from
-`run-metadata.json`. That artifact makes it easier to audit which Xcode flags
-the selected toolchain advertised for a run. Best-effort reporting probes that
-fail, time out, or produce unparseable output are recorded in
-`run-metadata.json` under `probe_warnings` with the probe source, command,
-exit code, timeout status, and a bounded output excerpt.
-
-Set `[test_products] enabled = true` to pass `-testProductsPath
-<job>/artifacts/test-products.xctestproducts` during `build-for-testing`.
-By default, XCSteward still executes with the generated `.xctestrun`, so the
-portable test-products bundle is available as an artifact without changing the
-runtime contract. Set `use_for_testing = true` to also pass
-`-testProductsPath <job>/artifacts/test-products.xctestproducts` to
-`test-without-building` instead of `-xctestrun`. `use_for_testing` requires
-`enabled = true`. The path is recorded in `artifacts/run-metadata.json` when
-Xcode materializes it.
-
----
+- `reset_policy`: `none` (default), `shutdown`, or `erase`. Cleans only
+  XCSteward-leased simulators after a job. Retry recovery still uses targeted
+  shutdown/erase on infrastructure failures.
+- `[destination]`: passes `-destination-timeout <seconds>` to destination-bearing
+  `xcodebuild` invocations. Omit to leave Xcode's default.
+- `[coverage]`: passes `-enableCodeCoverage YES|NO` to `build-for-testing` and
+  every `test-without-building`. Applied to both phases because coverage is
+  decided during build.
+- `[result_stream]`: when `enabled = true`, pre-creates the stream file and
+  passes `-resultStreamPath`.
+- `[result_bundle]`: passes `-resultBundleVersion <version>` to every
+  `test-without-building` that writes `.xcresult`.
+- Environment variables: every `xcodebuild` gets `XCSTEWARD_JOB_ID`,
+  `XCSTEWARD_PROJECT`, `XCSTEWARD_PHASE`, and run-scoped `TMPDIR`. Test
+  invocations also get `TEST_RUNNER_*` variants. Manual/hybrid shards get
+  `XCSTEWARD_SHARD_ID`, `XCSTEWARD_SHARD_INDEX`, `XCSTEWARD_TOTAL_SHARDS`,
+  and matching `TEST_RUNNER_*` variables with separate shard `TMPDIR`.
+- `--only-testing` / `--skip-testing`: passed directly to Xcode-managed runs.
+  Manual/hybrid shards use `--only-testing` as explicit shard input; when none
+  provided, enumerated tests are filtered with `--skip-testing` before
+  splitting, then skip filters pass to each shard.
+- `--only-test-configuration` / `--skip-test-configuration`: passed through to
+  Xcode on enumeration and every `test-without-building` invocation.
+- `[ports]`: reserves deterministic port ranges. Injects `XCSTEWARD_PORT_RANGE_*`
+  and matching `TEST_RUNNER_*` variables. Non-sharded runs use index `0`.
+  Manual/hybrid shards use `base + shard_index * stride`. Validated to fit
+  within TCP port 65535.
+- `[privacy]`: applies `xcrun simctl privacy` to each leased simulator before
+  tests. Supported services: `all`, `calendar`, `contacts-limited`, `contacts`,
+  `location`, `location-always`, `photos-add`, `photos`, `media-library`,
+  `microphone`, `motion`, `reminders`, `siri`. Applied independently to every
+  shard simulator including temporary managed clones.
+- `[test_timeouts]`: defaults shown above. Set `enabled = false` to pass
+  `-test-timeouts-enabled NO`. Defaults: `-test-timeouts-enabled YES`,
+  `-default-test-execution-time-allowance 120`,
+  `-maximum-test-execution-time-allowance 600`.
+- `[test_retries]`: opt-in Xcode native repetition. Passes
+  `-test-iterations <iterations>` plus `-retry-tests-on-failure` or
+  `-run-tests-until-failure`. Separate from XCSteward's infrastructure retry
+  path. `retry_tests_on_failure` and `run_tests_until_failure` are mutually
+  exclusive. `relaunch_between_iterations` passes
+  `-test-repetition-relaunch-enabled YES/NO`.
+- `[test_diagnostics]`: `collect = "on-failure"` or `"never"`. Omit to leave
+  scheme default.
+- `run-metadata.json`: audit manifest written by every terminal job. Includes
+  job state, result classification, simulator UDID, selected Xcode/macOS
+  versions, request filters, profile policy, and artifact paths.
+- Retry preservation: when XCSteward retries a runner/bootstrap failure, the
+  first-attempt `.xcresult` is preserved under
+  `artifacts/attempts/test-attempt-001/` and recorded in `run-metadata.json`.
+- `xcodebuild-help.txt`: best-effort snapshot of `xcodebuild -help`, linked from
+  `run-metadata.json`. Failed/timed-out probes are recorded under
+  `probe_warnings` with source, command, exit code, timeout status, and bounded
+  output excerpt.
+- `[test_products]`: `enabled = true` passes `-testProductsPath` during
+  `build-for-testing`. Default execution still uses `.xcctestrun`. Set
+  `use_for_testing = true` to also pass it to `test-without-building` instead
+  of `-xctestrun`. Requires `enabled = true`.
 
 ## Development
 
-Run the test suite:
+Run tests:
 
 ```bash
 swift test
 ```
 
-For the normal refactor loop, run the named fast tier. It writes suite-health
-JSON under `.build/test-suite/`:
+Fast tier for the refactor loop (writes suite-health JSON to
+`.build/test-suite/`):
 
 ```bash
 bash scripts/run-test-suite.sh --tier fast
 ```
 
-Before a release, run the fake-tool release tier and keep the report with the
-hardening-matrix and dogfood artifacts:
+Release tier before shipping (keep the report with hardening-matrix and
+dogfood artifacts):
 
 ```bash
 bash scripts/run-test-suite.sh --tier release --continue-on-failure \
   --report .build/test-suite/public-alpha-fake.json
 ```
 
-For targeted verification, use the checked filter wrapper so a stale
-`--filter` cannot pass as a zero-test run:
+Targeted verification with checked filter wrapper (prevents stale `--filter`
+from passing as a zero-test run):
 
 ```bash
 bash scripts/run-swift-test-filter.sh --filter SubmitCommandE2ETests/testSubmitWaitSuccessCreatesArtifactsAndStructuredSummary
 ```
 
-The default suite uses fake tools. To run the opt-in live Xcode-managed
-parallel smoke test against a real simulator, pass an explicit simulator UDID:
+Opt-in live Xcode-managed parallel smoke test against a real simulator:
 
 ```bash
 XCSTEWARD_RUN_LIVE_XCODE_MANAGED_SMOKE=1 \
@@ -795,11 +620,11 @@ XCSTEWARD_LIVE_SIMULATOR_ID=<simulator-udid> \
 swift test --filter LiveXcodeManagedParallelSmokeTests
 ```
 
-By default, that test generates a tiny Swift package and runs it through
-XCSteward with `parallel.mode = "xcode-managed"` and exact worker count `2`.
-To point the smoke test at an existing project instead, also set
-`XCSTEWARD_LIVE_REPO_ROOT`, `XCSTEWARD_LIVE_SCHEME`, and optionally
-`XCSTEWARD_LIVE_PROJECT_PATH` or `XCSTEWARD_LIVE_WORKSPACE_PATH`.
+By default this generates a tiny Swift package and runs it through XCSteward
+with `parallel.mode = "xcode-managed"` and `exact_workers = true` (worker
+count 2). To point at an existing project, also set `XCSTEWARD_LIVE_REPO_ROOT`,
+`XCSTEWARD_LIVE_SCHEME`, and optionally `XCSTEWARD_LIVE_PROJECT_PATH` or
+`XCSTEWARD_LIVE_WORKSPACE_PATH`.
 
 Run the built binary:
 
@@ -807,65 +632,54 @@ Run the built binary:
 ./.build/arm64-apple-macosx/debug/xcsteward doctor --json
 ```
 
----
+## Scope
 
-## Scope & limitations
-
-> [!WARNING]
+> [!NOTE]
 > XCSteward is public-alpha software. Use it first on disposable or low-risk
 > local state and keep raw `xcodebuild` as the fallback.
 
-**Supported:** local Apple Silicon or Intel Mac, macOS 13+, Swift 6, Xcode 16+
-selected by `xcode-select`, iOS Simulator execution, serialized local jobs.
+| Category | Detail |
+| --- | --- |
+| **Supported** | Local Apple Silicon or Intel Mac, macOS 13+, Swift 6, Xcode 16+ selected by `xcode-select`, iOS Simulator execution, serialized local jobs |
+| **Experimental** | Xcode-managed parallelism, manual sharding, multi-job dispatch, shared-Mac operation. Require explicit opt-in and passed live dogfood run on target host |
+| **Out of scope** | Native macOS app destinations (`-destination platform=macOS`), multi-host scheduling, hosted dashboards. Native macOS support is post-alpha roadmap work |
 
-**Experimental:** xcode-managed parallelism, manual sharding, multi-job
-dispatch, shared-Mac operation. These require an explicit opt-in and a
-passed live dogfood run on the target host.
+XCSteward is host-local. Queue, worker lease, simulator lease, and artifact
+state live under one state root on one Mac. Distributed coordination is out of
+scope today.
 
-**Out of scope:** native macOS app destinations (`-destination platform=macOS`),
-multi-host scheduling, hosted dashboards. Native macOS support is post-alpha
-roadmap work.
+The public alpha targets recent local Xcode installs and local iOS Simulator
+execution. Older Xcode versions, unusual toolchain selections, beta simulator
+runtimes, and CI-hosted macOS images may work but are not in the supported
+range until they have live dogfood coverage.
 
-XCSteward is host-local. The queue, worker lease, simulator lease, and artifact
-state live under one state root on one Mac; distributed worker coordination is
-out of scope today.
+Native macOS app destinations are post-alpha. Profiles target iOS Simulator
+execution; run native macOS app tests with direct
+`xcodebuild -destination platform=macOS` until XCSteward adds a simulator-free
+path. Mac-only schemes return `unsupported_destination` instead of being run
+against a simulator.
 
-The public alpha is intended for recent local Xcode installs and local iOS
-Simulator execution only. Older Xcode versions, unusual toolchain selections,
-beta simulator runtimes, and CI-hosted macOS images may work, but they are not
-yet part of the supported range until they have live dogfood coverage.
-
-Native macOS app destinations are post-alpha roadmap work. Profiles currently
-target iOS Simulator execution rather than `-destination platform=macOS`; run
-native macOS app tests with direct `xcodebuild -destination platform=macOS`
-until XCSteward adds a simulator-free destination path. Mac-only schemes are
-reported as `unsupported_destination` instead of being run against a simulator.
-
-XCSteward depends on local Xcode and CoreSimulator behavior. It can recover
-from stale XCSteward-owned leases and targeted simulator failures, but broad
-host repair still requires an operator decision. `doctor --fix` is
-XCSteward-scoped by default, and global CoreSimulator cleanup requires
+XCSteward recovers from stale XCSteward-owned leases and targeted simulator
+failures, but broad host repair requires an operator decision. `doctor --fix`
+is XCSteward-scoped by default. Global CoreSimulator cleanup requires
 `doctor --fix-global --dangerously-confirm-global-coresimulator-cleanup`.
 
-Artifacts are preserved for completed jobs, and retry attempts preserve their
-own attempt-specific bundles. The `cleanup` command provides conservative
-age-based terminal-job cleanup and optional total-size budgeting for terminal
-jobs under the XCSteward state root. Hosts still need disk monitoring for
-non-XCSteward storage and protected active jobs.
+Artifacts are preserved for completed jobs; retry attempts preserve their own
+attempt-specific bundles. The `cleanup` command provides conservative age-based
+terminal-job cleanup and optional total-size budgeting. Hosts still need disk
+monitoring for non-XCSteward storage and protected active jobs.
 
-`--json` result output is structured and stable enough for agents. Agents
-should parse stdout for loaded command results and stderr for command error
-documents, while still using the process exit code for the top-level outcome.
+`--json` output is structured and stable enough for agents. Parse stdout for
+loaded command results and stderr for command error documents; use the process
+exit code for the top-level outcome.
 
-Manual and hybrid sharding still rely on test enumeration and Xcode result
-tooling. If those tools change shape or fail, XCSteward records best-effort
-diagnostics but may need follow-up fixes for new Xcode releases.
+Manual and hybrid sharding rely on test enumeration and Xcode result tooling.
+If those tools change or fail, XCSteward records best-effort diagnostics but
+may need follow-up fixes for new Xcode releases.
 
 Concurrent dispatch and shared-Mac use are still alpha surfaces. Leave
 `XCSTEWARD_MAX_CONCURRENT_JOBS` unset unless you have run the hardening matrix
 and a live smoke test on that host.
-
----
 
 ## Links
 
@@ -880,26 +694,24 @@ and a live smoke test on that host.
 
 ## Uninstall
 
-Remove the installed binary:
+Remove the binary:
 
 ```bash
 rm "$HOME/.local/bin/xcsteward"
 ```
 
-Clean old terminal jobs without deleting active or non-XCSteward state:
+Clean old terminal jobs without touching active or non-XCSteward state:
 
 ```bash
 xcsteward cleanup --dry-run --older-than 7d --keep-last 20 --max-total-size 50gb --json
 xcsteward cleanup --apply --older-than 7d --keep-last 20 --max-total-size 50gb --json
 ```
 
-To remove all XCSteward-local state after stopping any active XCSteward worker,
-delete only the configured state root:
+Remove all XCSteward-local state after stopping active workers:
 
 ```bash
 rm -rf "$HOME/Library/Application Support/XCSteward"
 ```
 
-If you used `XCSTEWARD_HOME` or `--state-root`, remove that explicit directory
-instead. Do not delete global CoreSimulator state as part of uninstalling
-XCSteward.
+If you used `XCSTEWARD_HOME` or `--state-root`, remove that directory instead.
+Do not delete global CoreSimulator state as part of uninstalling XCSteward.
