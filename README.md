@@ -694,6 +694,15 @@ and a live smoke test on that host.
 
 ## Uninstall
 
+### Homebrew
+
+```bash
+brew uninstall xcsteward
+brew untap acyment/tap
+```
+
+### Manual install
+
 Remove the binary:
 
 ```bash
