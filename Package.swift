@@ -1,4 +1,11 @@
 // swift-tools-version: 6.0
+
+// SPDX-License-Identifier: Apache-2.0
+
+// Copyright 2026 XCSteward Contributors
+
+
+
 import PackageDescription
 
 let package = Package(
