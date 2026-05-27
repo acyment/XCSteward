@@ -1,5 +1,9 @@
 # XCSteward
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![macOS](https://img.shields.io/badge/platform-macOS%2013+-silver.svg)]()
+[![Version](https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg)]()
+
 ```
 __   __   ____   _____ _                             _
  \ \ / /  / ___| / ____| |                           | |
@@ -53,38 +57,27 @@ Agents no longer trip over each other's simulator state.
 
 ## Why XCSteward
 
-### Stops simulator collisions
-
-Running `xcodebuild test` from multiple terminals or agents races for the same
-CoreSimulator device. XCSteward serializes jobs through a lease-backed queue —
-no more "Simulator is already in use" errors, no overlapping boot/shutdown,
-no surprise destination failures.
-
-### Every job leaves evidence
-
-Build logs, test logs, `.xcresult` bundles, JUnit XML, a machine-readable
-`command-events.jsonl` timeline, and job metadata are preserved per run. When a
-test fails three days ago on a CI Mac, the evidence is still there.
-
-### Built for agents, not just terminals
-
-Structured `--json` output, streaming `--progress` events on stderr, and
-predictable exit codes make XCSteward safe for AI coding agents to invoke
-without parsing human-readable walls of text.
-
-### Safe by default
-
-XCSteward will not mutate a simulator without a job-owned lease, delete state
-outside its configured root, or run broad CoreSimulator cleanup without an
-explicit opt-in flag. The safety invariants are verified by a 65-row hardening
-matrix that passes before every release.
-
-### Multi-project from a single binary
-
-Define profiles for each `.xcodeproj` or `.xcworkspace` you own — CocoaPods,
-SwiftPM, Flutter, React Native — and dispatch jobs to the same simulator pool
-with one CLI. Switch projects without reconfiguring simulators or environment
-variables.
+- 🛑 **Stops simulator collisions.** Running `xcodebuild test` from multiple
+  terminals or agents races for the same CoreSimulator device. XCSteward
+  serializes jobs through a lease-backed queue — no more "Simulator is
+  already in use" errors, no overlapping boot/shutdown, no surprise
+  destination failures.
+- 📦 **Every job leaves evidence.** Build logs, test logs, `.xcresult` bundles,
+  JUnit XML, a machine-readable `command-events.jsonl` timeline, and job
+  metadata are preserved per run. When a test fails three days ago on a CI
+  Mac, the evidence is still there.
+- 🤖 **Built for agents, not just terminals.** Structured `--json` output,
+  streaming `--progress` events on stderr, and predictable exit codes make
+  XCSteward safe for AI coding agents to invoke without parsing human-readable
+  walls of text.
+- 🛡️ **Safe by default.** XCSteward will not mutate a simulator without a
+  job-owned lease, delete state outside its configured root, or run broad
+  CoreSimulator cleanup without an explicit opt-in flag. The safety invariants
+  are verified by a 65-row hardening matrix that passes before every release.
+- 🔄 **Multi-project from a single binary.** Define profiles for each
+  `.xcodeproj` or `.xcworkspace` you own — CocoaPods, SwiftPM, Flutter, React
+  Native — and dispatch jobs to the same simulator pool with one CLI. Switch
+  projects without reconfiguring simulators or environment variables.
 
 ---
 
