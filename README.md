@@ -1,28 +1,60 @@
 # XCSteward
 
-Local macOS CLI for coordinating iOS simulator test jobs across projects and coding agents.
+**Queue, run, and inspect iOS simulator tests — without simulator collisions,
+lost artifacts, or mystery failures.** XCSteward is a local macOS CLI that
+serializes `xcodebuild` test jobs through a shared simulator pool, preserves
+every artifact, and surfaces structured output that both humans and AI coding
+agents can consume.
 
-## Public alpha scope
+### Why XCSteward
+
+- **Stops simulator collisions.** Running `xcodebuild test` from multiple
+  terminals or agents races for the same CoreSimulator device. XCSteward
+  serializes jobs through a lease-backed queue — no more "Simulator is
+  already in use" errors, no overlapping boot/shutdown, no surprise
+  destination failures.
+- **Every job leaves evidence.** Build logs, test logs, `.xcresult` bundles,
+  JUnit XML, a machine-readable `command-events.jsonl` timeline, and job
+  metadata are preserved per run. When a test fails three days ago on a CI
+  Mac, the evidence is still there.
+- **Built for agents, not just terminals.** Structured `--json` output,
+  streaming `--progress` events on stderr, and predictable exit codes make
+  XCSteward safe for AI coding agents to invoke without parsing human-readable
+  walls of text.
+- **Safe by default.** XCSteward will not mutate a simulator without a
+  job-owned lease, delete state outside its configured root, or run broad
+  CoreSimulator cleanup without an explicit opt-in flag. The safety invariants
+  are verified by a 65-row hardening matrix that passes before every release.
+- **Multi-project from a single binary.** Define profiles for each
+  `.xcodeproj` or `.xcworkspace` you own — CocoaPods, SwiftPM, Flutter, React
+  Native — and dispatch jobs to the same simulator pool with one CLI. Switch
+  projects without reconfiguring simulators or environment variables.
+
+### Quick links
+
+| | |
+| --- | --- |
+| Operator runbook | [docs/public-alpha.md](docs/public-alpha.md) |
+| Hardening matrix | [docs/hardening-matrix.md](docs/hardening-matrix.md) |
+| Live dogfood evidence | [docs/dogfood-ledger.md](docs/dogfood-ledger.md) |
+| Agent workflow examples | [Examples/agents](Examples/agents) |
+| Sample profiles | [Examples/profiles](Examples/profiles) |
+
+### Public alpha scope
 
 XCSteward is public-alpha software. Use it first on disposable or low-risk
-local state, keep raw `xcodebuild` as the fallback, and inspect the job
-artifacts when a run fails. The alpha safety promise is narrow: XCSteward
-should not report false success, mutate simulators without a job-owned lease,
-delete state outside its configured state root, or run broad CoreSimulator
-cleanup unless an operator explicitly opts in with a global fix flag.
+local state and keep raw `xcodebuild` as the fallback.
 
-The supported alpha target is a local Apple Silicon or Intel Mac running
-macOS 13 or newer with a Swift 6 toolchain and Xcode 16 or newer selected by
-`xcode-select`. The fake-tool test suite is the default verification path.
-Before tagging a public alpha, also run the opt-in live smoke test on the
-exact Xcode and simulator runtime you intend to support.
-The release-gate runbook is [docs/hardening-matrix.md](docs/hardening-matrix.md).
-The public-alpha operator runbook is [docs/public-alpha.md](docs/public-alpha.md), and live-use progress is tracked in [docs/dogfood-ledger.md](docs/dogfood-ledger.md).
+**Supported:** local Apple Silicon or Intel Mac, macOS 13+, Swift 6, Xcode 16+
+selected by `xcode-select`, iOS Simulator execution, serialized local jobs.
 
-Keep alpha concurrency conservative. Serialized local simulator jobs are the
-default. Multi-job dispatch, manual sharding, hybrid sharding, and shared-Mac
-operation should be treated as experimental until they pass the hardening
-matrix and a live dogfood run on the target host.
+**Experimental:** xcode-managed parallelism, manual sharding, multi-job
+dispatch, shared-Mac operation. These require an explicit opt-in and a
+passed live dogfood run on the target host.
+
+**Out of scope:** native macOS app destinations (`-destination platform=macOS`),
+multi-host scheduling, hosted dashboards. Native macOS support is post-alpha
+roadmap work.
 
 ## Install
 
