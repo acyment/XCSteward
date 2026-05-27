@@ -1,12 +1,19 @@
 <div align="center">
-<img alt="XCSteward" src="assets/logo.svg" width="128" style="margin:0;">
-<h1 style="margin:24px 0 4px;">XCSteward</h1>
-<p style="margin:0 0 8px;"><strong>Queue, run, and inspect iOS simulator tests — without simulator collisions, lost artifacts, or mystery failures.</strong></p>
-<p style="margin:0 0 0;">
-<a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-<a href=""><img src="https://img.shields.io/badge/platform-macOS%2013+-silver.svg" alt="macOS"></a>
-<a href=""><img src="https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg" alt="Version"></a>
-</p>
+  <img alt="XCSteward" src="assets/logo.svg" width="128">
+
+  <h1>XCSteward</h1>
+
+  <p>
+    <strong>Queue, run, and inspect iOS simulator tests — without simulator collisions, lost artifacts, or mystery failures.</strong>
+  </p>
+
+  <p>
+    <a href="https://opensource.org/licenses/Apache-2.0">
+      <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
+    </a>
+    <img src="https://img.shields.io/badge/platform-macOS%2013+-silver.svg" alt="macOS 13+">
+    <img src="https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg" alt="v0.1.0-alpha">
+  </p>
 </div>
 
 ---
