@@ -1,20 +1,22 @@
+<div align="center">
+<img alt="XCSteward" src="assets/logo.svg" width="180">
+
 # XCSteward
+
+**Queue, run, and inspect iOS simulator tests — without simulator collisions, lost artifacts, or mystery failures.**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![macOS](https://img.shields.io/badge/platform-macOS%2013+-silver.svg)]()
 [![Version](https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg)]()
 
-<img alt="XCSteward" src="assets/logo.svg" width="140">
-
-**A local macOS CLI that queues, runs, and inspects iOS simulator tests —
-without simulator collisions, lost artifacts, or mystery failures.**
+</div>
 
 Built for teams running multiple coding agents against the same Mac. XCSteward
 serializes `xcodebuild` jobs through a lease-backed queue, preserves every
 artifact, and surfaces structured JSON output that both humans and agents can
 consume without parsing walls of text.
 
-**License:** Apache 2.0 · **Platform:** macOS 13+ · **Requires:** Swift 6, Xcode 16+
+> **Requires:** Swift 6 · Xcode 16+ · macOS 13+
 
 ## What it does
 
