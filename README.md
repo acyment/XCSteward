@@ -1,5 +1,5 @@
 <div align="center">
-<img alt="XCSteward" src="assets/logo.svg" width="180">
+<img alt="XCSteward" src="assets/logo.svg" width="150">
 
 # XCSteward
 
@@ -11,31 +11,18 @@
 
 </div>
 
-Built for teams running multiple coding agents against the same Mac. XCSteward
-serializes `xcodebuild` jobs through a lease-backed queue, preserves every
-artifact, and surfaces structured JSON output that both humans and agents can
-consume without parsing walls of text.
+XCSteward is a local-first macOS CLI for iOS development environments where humans, scripts, and coding agents can collide over the same simulator state.
 
-> **Requires:** Swift 6 · Xcode 16+ · macOS 13+
+It serializes `xcodebuild` jobs through a lease-backed queue, isolates every job's DerivedData, logs, `.xcresult`, and summary JSON, and gives both humans and agents a stable contract for running simulator tests without scraping walls of text.
+
+> Requires: Swift 6 · Xcode 16+ · macOS 13+
 
 ## What it does
 
-- **Serializes simulator access.** Jobs queue for a shared simulator pool
-  instead of racing for the same CoreSimulator device. No more "Simulator is
-  already in use" errors or overlapping boot/shutdown cycles.
-- **Preserves evidence.** Every run keeps build logs, test logs, `.xcresult`
-  bundles, JUnit XML, a machine-readable `command-events.jsonl` timeline, and
-  job metadata. When a test fails three days ago, the evidence is still there.
-- **Speaks agent.** Structured `--json` output, streaming `--progress` events
-  on stderr, and predictable exit codes mean agents can drive it without
-  heuristic screen-scraping.
-- **Won't touch what it doesn't own.** Simulators are leased per job. State
-  outside the configured root is never deleted. Broad CoreSimulator cleanup
-  requires an explicit opt-in flag. Safety invariants are verified by a 65-row
-  hardening matrix.
-- **Handles multiple projects.** One binary, one simulator pool, one queue.
-  Define profiles for each `.xcodeproj` or `.xcworkspace` — CocoaPods, SwiftPM,
-  Flutter, React Native — and switch projects without reconfiguring devices.
+- Queues simulator test jobs instead of letting agents call `xcodebuild` directly
+- Runs one controlled simulator job at a time
+- Isolates DerivedData, logs, `.xcresult`, and JSON summaries per job
+- Gives humans and agents a stable CLI contract for test execution
 
 ## The problem
 
