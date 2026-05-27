@@ -1,5 +1,14 @@
 # XCSteward
 
+```
+__   __   ____   _____ _                             _
+ \ \ / /  / ___| / ____| |                           | |
+  \ V /  | |    | (___ | |_ _____      ____ _ _ __ __| |
+   > <   | |     \___ \| __/ _ \ \ /\ / / _` | '__/ _` |
+  / . \  | |___  ____) | ||  __/\ V  V / (_| | | | (_| |
+ /_/ \_\  \____||_____/ \__\___| \_/\_/ \__,_|_|  \__,_|
+```
+
 **Queue, run, and inspect iOS simulator tests — without simulator collisions,
 lost artifacts, or mystery failures.** XCSteward is a local macOS CLI that
 serializes `xcodebuild` test jobs through a shared simulator pool, preserves
