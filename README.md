@@ -9,53 +9,84 @@ __   __   ____   _____ _                             _
  /_/ \_\  \____||_____/ \__\___| \_/\_/ \__,_|_|  \__,_|
 ```
 
-**Queue, run, and inspect iOS simulator tests — without simulator collisions,
-lost artifacts, or mystery failures.** XCSteward is a local macOS CLI that
-serializes `xcodebuild` test jobs through a shared simulator pool, preserves
-every artifact, and surfaces structured output that both humans and AI coding
-agents can consume.
+> **Queue, run, and inspect iOS simulator tests — without simulator collisions,
+> lost artifacts, or mystery failures.**
+>
+> A local macOS CLI that serializes `xcodebuild` test jobs through a shared
+> simulator pool, preserves every artifact, and surfaces structured output
+> that both humans and **AI coding agents** can consume.
 
-### The problem
+---
 
-iOS simulator test execution was designed for one human at a time. Point
-`xcodebuild` at a simulator, run your tests, done. But modern workflows
-use **multiple coding agents** working in parallel — one on the login flow,
-one fixing a flaky snapshot test, one upgrading a dependency. When two agents
-point `xcodebuild` at the same simulator, the simulator boots and shuts down
-under competing requests, `xcodebuild -showdestinations` returns placeholder
-only output, and neither agent gets a clean result. The "Simulator is already
-in use" race condition is not a simulator bug — it's a scheduling problem that
-raw `xcodebuild` doesn't solve.
+## The problem
 
-XCSteward turns that single-user execution model into a **multi-agent queue**.
-Each agent submits a job, the queue serializes access to the shared simulator
-pool, and every job runs to completion with isolated DerivedData, preserved
-artifacts, and a deterministic result. Agents no longer trip over each other's
-simulator state.
+iOS simulator test execution was designed for **one human at a time**.
 
-### Why XCSteward
+```
+xcodebuild test -destination 'platform=iOS Simulator,name=iPhone 16' ...
+```
 
-- **Stops simulator collisions.** Running `xcodebuild test` from multiple
-  terminals or agents races for the same CoreSimulator device. XCSteward
-  serializes jobs through a lease-backed queue — no more "Simulator is
-  already in use" errors, no overlapping boot/shutdown, no surprise
-  destination failures.
-- **Every job leaves evidence.** Build logs, test logs, `.xcresult` bundles,
-  JUnit XML, a machine-readable `command-events.jsonl` timeline, and job
-  metadata are preserved per run. When a test fails three days ago on a CI
-  Mac, the evidence is still there.
-- **Built for agents, not just terminals.** Structured `--json` output,
-  streaming `--progress` events on stderr, and predictable exit codes make
-  XCSteward safe for AI coding agents to invoke without parsing human-readable
-  walls of text.
-- **Safe by default.** XCSteward will not mutate a simulator without a
-  job-owned lease, delete state outside its configured root, or run broad
-  CoreSimulator cleanup without an explicit opt-in flag. The safety invariants
-  are verified by a 65-row hardening matrix that passes before every release.
-- **Multi-project from a single binary.** Define profiles for each
-  `.xcodeproj` or `.xcworkspace` you own — CocoaPods, SwiftPM, Flutter, React
-  Native — and dispatch jobs to the same simulator pool with one CLI. Switch
-  projects without reconfiguring simulators or environment variables.
+Point it at a simulator, run your tests, done.
+
+But **modern workflows run multiple coding agents in parallel** — one on the
+login flow, one fixing a flaky snapshot test, one upgrading a dependency.
+When two agents point `xcodebuild` at the same simulator at the same time:
+
+| What happens | Why it breaks |
+| --- | --- |
+| Simulator boots and shuts down under competing requests | Neither agent owns the device |
+| `xcodebuild -showdestinations` returns placeholder only output | Xcode can't enumerate a busy simulator |
+| "Simulator is already in use" error | Race condition, not a simulator bug |
+| Tests pass locally but fail on CI with no evidence | No artifacts preserved, no timeline |
+
+> **This is not a simulator bug. It's a scheduling problem that raw `xcodebuild` doesn't solve.**
+
+XCSteward turns that single-user model into a **multi-agent queue**:
+
+1. Each agent submits a job
+2. The queue serializes access to the shared simulator pool
+3. Every job runs to completion with **isolated DerivedData**, **preserved artifacts**, and a **deterministic result**
+
+Agents no longer trip over each other's simulator state.
+
+---
+
+## Why XCSteward
+
+### Stops simulator collisions
+
+Running `xcodebuild test` from multiple terminals or agents races for the same
+CoreSimulator device. XCSteward serializes jobs through a lease-backed queue —
+no more "Simulator is already in use" errors, no overlapping boot/shutdown,
+no surprise destination failures.
+
+### Every job leaves evidence
+
+Build logs, test logs, `.xcresult` bundles, JUnit XML, a machine-readable
+`command-events.jsonl` timeline, and job metadata are preserved per run. When a
+test fails three days ago on a CI Mac, the evidence is still there.
+
+### Built for agents, not just terminals
+
+Structured `--json` output, streaming `--progress` events on stderr, and
+predictable exit codes make XCSteward safe for AI coding agents to invoke
+without parsing human-readable walls of text.
+
+### Safe by default
+
+XCSteward will not mutate a simulator without a job-owned lease, delete state
+outside its configured root, or run broad CoreSimulator cleanup without an
+explicit opt-in flag. The safety invariants are verified by a 65-row hardening
+matrix that passes before every release.
+
+### Multi-project from a single binary
+
+Define profiles for each `.xcodeproj` or `.xcworkspace` you own — CocoaPods,
+SwiftPM, Flutter, React Native — and dispatch jobs to the same simulator pool
+with one CLI. Switch projects without reconfiguring simulators or environment
+variables.
+
+---
 
 ### Quick links
 
