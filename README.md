@@ -26,9 +26,27 @@ matrix and a live dogfood run on the target host.
 
 ## Install
 
-XCSteward is currently installed from source:
+### Homebrew
 
 ```bash
+brew tap acyment/tap
+brew install xcsteward
+```
+
+Verify the binary and local host setup:
+
+```bash
+xcsteward --help
+xcsteward doctor --json
+```
+
+### From Source
+
+Requires a Swift 6 toolchain and Xcode 16 or newer.
+
+```bash
+git clone https://github.com/acyment/XCSteward.git
+cd XCSteward
 swift build -c release
 mkdir -p "$HOME/.local/bin"
 cp .build/release/xcsteward "$HOME/.local/bin/xcsteward"
@@ -38,13 +56,6 @@ Add the install directory to your shell path if needed:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Verify the binary and local host setup:
-
-```bash
-xcsteward --help
-xcsteward doctor --json
 ```
 
 The default state root is `~/Library/Application Support/XCSteward`. Override
