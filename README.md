@@ -1,13 +1,15 @@
 <div align="center">
-<img alt="XCSteward" src="assets/logo.svg" width="140">
-<h1>XCSteward</h1>
-<p><strong>Queue, run, and inspect iOS simulator tests — without simulator collisions, lost artifacts, or mystery failures.</strong></p>
-<p>
+<img alt="XCSteward" src="assets/logo.svg" width="128" style="margin:0;">
+<h1 style="margin:24px 0 4px;">XCSteward</h1>
+<p style="margin:0 0 8px;"><strong>Queue, run, and inspect iOS simulator tests — without simulator collisions, lost artifacts, or mystery failures.</strong></p>
+<p style="margin:0 0 0;">
 <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
 <a href=""><img src="https://img.shields.io/badge/platform-macOS%2013+-silver.svg" alt="macOS"></a>
 <a href=""><img src="https://img.shields.io/badge/version-v0.1.0--alpha-orange.svg" alt="Version"></a>
 </p>
 </div>
+
+---
 
 XCSteward is a local-first macOS CLI for iOS development environments where humans, scripts, and coding agents can collide over the same simulator state.
 
@@ -34,12 +36,12 @@ Point, run, done. But modern workflows run multiple coding agents in parallel
 — one on the login flow, one fixing a flaky snapshot test, one upgrading a
 dependency. When two agents hit the same simulator:
 
-| Symptom | Why |
-| --- | --- |
-| Simulator boots and shuts down under competing requests | Neither agent owns the device |
+| Symptom                                                        | Why                                    |
+| -------------------------------------------------------------- | -------------------------------------- |
+| Simulator boots and shuts down under competing requests        | Neither agent owns the device          |
 | `xcodebuild -showdestinations` returns placeholder-only output | Xcode can't enumerate a busy simulator |
-| "Simulator is already in use" error | Race condition, not a simulator bug |
-| Tests pass locally but fail on CI with no evidence | No artifacts preserved, no timeline |
+| "Simulator is already in use" error                            | Race condition, not a simulator bug    |
+| Tests pass locally but fail on CI with no evidence             | No artifacts preserved, no timeline    |
 
 > This is not a simulator bug. It's a scheduling problem that raw `xcodebuild`
 > doesn't solve.
@@ -311,20 +313,20 @@ When concurrency is enabled, XCSteward writes a `host-health.json` snapshot and
 reduces dispatch to one job when health signals indicate constrained capacity.
 Supported environment inputs:
 
-| Variable | Behavior |
-| --- | --- |
-| `XCSTEWARD_MEMORY_PRESSURE` | Injected memory pressure level |
-| `XCSTEWARD_SAMPLE_MEMORY_PRESSURE` | Sample macOS `memory_pressure`; reduces dispatch on warning/serious/critical |
-| `XCSTEWARD_THERMAL_STATE` | Injected thermal state |
-| `XCSTEWARD_SAMPLE_THERMAL_STATE` | Sample `pmset -g therm`; reduces dispatch on serious/critical CPU throttling |
-| `XCSTEWARD_MAX_LOAD_AVERAGE` | Reduce dispatch when 1-minute load reaches threshold |
-| `XCSTEWARD_LOAD_AVERAGE` | Override sampled load average |
-| `XCSTEWARD_MAX_BOOTED_SIMULATORS` | Cap booted simulators |
-| `XCSTEWARD_BOOTED_SIMULATOR_COUNT` | Override booted count |
-| `XCSTEWARD_MAX_ACTIVE_SIMULATOR_LEASES` | Cap simulator lease pressure independently from job count |
-| `XCSTEWARD_FOREIGN_ACTIVITY_POLICY` | `capacity` (default), `strict`, or `ignore` for non-XCSteward xcodebuild activity |
-| `XCSTEWARD_RECENT_INFRA_FAILURE_LIMIT` + `XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS` | Drain gate |
-| `XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT` | Write `draining=true` and stop dispatch when reached |
+| Variable                                                                                 | Behavior                                                                          |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `XCSTEWARD_MEMORY_PRESSURE`                                                              | Injected memory pressure level                                                    |
+| `XCSTEWARD_SAMPLE_MEMORY_PRESSURE`                                                       | Sample macOS `memory_pressure`; reduces dispatch on warning/serious/critical      |
+| `XCSTEWARD_THERMAL_STATE`                                                                | Injected thermal state                                                            |
+| `XCSTEWARD_SAMPLE_THERMAL_STATE`                                                         | Sample `pmset -g therm`; reduces dispatch on serious/critical CPU throttling      |
+| `XCSTEWARD_MAX_LOAD_AVERAGE`                                                             | Reduce dispatch when 1-minute load reaches threshold                              |
+| `XCSTEWARD_LOAD_AVERAGE`                                                                 | Override sampled load average                                                     |
+| `XCSTEWARD_MAX_BOOTED_SIMULATORS`                                                        | Cap booted simulators                                                             |
+| `XCSTEWARD_BOOTED_SIMULATOR_COUNT`                                                       | Override booted count                                                             |
+| `XCSTEWARD_MAX_ACTIVE_SIMULATOR_LEASES`                                                  | Cap simulator lease pressure independently from job count                         |
+| `XCSTEWARD_FOREIGN_ACTIVITY_POLICY`                                                      | `capacity` (default), `strict`, or `ignore` for non-XCSteward xcodebuild activity |
+| `XCSTEWARD_RECENT_INFRA_FAILURE_LIMIT` + `XCSTEWARD_RECENT_INFRA_FAILURE_WINDOW_SECONDS` | Drain gate                                                                        |
+| `XCSTEWARD_INFRA_FAILURE_DRAIN_LIMIT`                                                    | Write `draining=true` and stop dispatch when reached                              |
 
 Recovered runner/bootstrap incidents (including shard retries that ultimately
 succeed) count as recent infrastructure failures for the capacity gate.
@@ -618,9 +620,9 @@ Run the built binary:
 > XCSteward is public-alpha software. Use it first on disposable or low-risk
 > local state and keep raw `xcodebuild` as the fallback.
 
-| Category | Detail |
-| --- | --- |
-| **Supported** | Local Apple Silicon or Intel Mac, macOS 13+, Swift 6, Xcode 16+ selected by `xcode-select`, iOS Simulator execution, serialized local jobs |
+| Category         | Detail                                                                                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Supported**    | Local Apple Silicon or Intel Mac, macOS 13+, Swift 6, Xcode 16+ selected by `xcode-select`, iOS Simulator execution, serialized local jobs               |
 | **Experimental** | Xcode-managed parallelism, manual sharding, multi-job dispatch, shared-Mac operation. Require explicit opt-in and passed live dogfood run on target host |
 | **Out of scope** | Native macOS app destinations (`-destination platform=macOS`), multi-host scheduling, hosted dashboards. Native macOS support is post-alpha roadmap work |
 
@@ -663,14 +665,14 @@ and a live smoke test on that host.
 
 ## Links
 
-| Resource | Path |
-| --- | --- |
-| Operator runbook | [docs/public-alpha.md](docs/public-alpha.md) |
-| Hardening matrix | [docs/hardening-matrix.md](docs/hardening-matrix.md) |
-| Live dogfood evidence | [docs/dogfood-ledger.md](docs/dogfood-ledger.md) |
-| Agent workflow examples | [Examples/agents](Examples/agents) |
-| Sample profiles | [Examples/profiles](Examples/profiles) |
-| Demo iOS fixture | [Examples/DemoApp](Examples/DemoApp) |
+| Resource                | Path                                                 |
+| ----------------------- | ---------------------------------------------------- |
+| Operator runbook        | [docs/public-alpha.md](docs/public-alpha.md)         |
+| Hardening matrix        | [docs/hardening-matrix.md](docs/hardening-matrix.md) |
+| Live dogfood evidence   | [docs/dogfood-ledger.md](docs/dogfood-ledger.md)     |
+| Agent workflow examples | [Examples/agents](Examples/agents)                   |
+| Sample profiles         | [Examples/profiles](Examples/profiles)               |
+| Demo iOS fixture        | [Examples/DemoApp](Examples/DemoApp)                 |
 
 ## Uninstall
 
