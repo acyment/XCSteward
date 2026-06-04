@@ -169,23 +169,33 @@ CoreSimulator cleanup requires `--fix-global` plus the danger confirmation flag.
 
 ## API
 
-Commands with `--json` write one JSON document to stdout. Some return nonzero
-exit codes after printing JSON — for example `status --json` on a failed job
-or `doctor --json` when a required check fails. When `--json` is present but
-the command fails before loading its object, XCSteward writes one JSON error to
-stderr and leaves stdout empty:
+> **[`CONTRACT.md`](CONTRACT.md) is the authoritative, versioned spec** for the
+> machine-readable interface (commands, JSON shapes, enums, exit-code table, and
+> the evolution policy). For driving XCSteward from an agent, see
+> [`AGENTS.md`](AGENTS.md). The summary below is a quick reference.
+
+Commands with `--json` write one JSON document to stdout. **Every JSON document
+includes a top-level integer `schema_version` (currently `1`)**; treat unknown
+future fields as additive. Commands return a **documented exit code** — `0` for
+success, and distinct nonzero codes for usage errors, job outcomes (test
+failure, timeout, infra failure, …), and doctor failure. See the exit-code table
+in [`CONTRACT.md`](CONTRACT.md).
+
+When `--json` is present but the command fails before loading its object,
+XCSteward writes one JSON error to stderr and leaves stdout empty:
 
 ```json
 {
   "error": {
     "code": "usage",
     "message": "submit requires --project"
-  }
+  },
+  "schema_version": 1
 }
 ```
 
 Stable error codes: `usage`, `not_found`, `invalid_configuration`,
-`command_failed`, `canceled`, `unexpected_error`.
+`state_root_unavailable`, `command_failed`, `canceled`, `unexpected_error`.
 
 ### Job summary
 
