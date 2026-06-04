@@ -36,6 +36,7 @@ struct CleanupReport: Codable, Sendable {
     var candidateCount: Int
     var deletedCount: Int
     var candidates: [CleanupJob]
+    var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
         case dryRun = "dry_run"
@@ -48,6 +49,7 @@ struct CleanupReport: Codable, Sendable {
         case candidateCount = "candidate_count"
         case deletedCount = "deleted_count"
         case candidates
+        case schemaVersion = "schema_version"
     }
 }
 

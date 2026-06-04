@@ -42,7 +42,7 @@ final class WorkerCrashRecoveryE2ETests: XCTestCase {
         }
 
         let result = finishCLI(waitingClient)
-        XCTAssertEqual(result.status, 1, result.stderr)
+        XCTAssertEqual(result.status, 14, result.stderr)
         let summary = try result.jsonObject()
         XCTAssertEqual(summary["job_id"] as? String, crashJobID)
         XCTAssertEqual(summary["state"] as? String, "interrupted")

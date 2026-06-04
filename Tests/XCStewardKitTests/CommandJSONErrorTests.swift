@@ -8,7 +8,7 @@ final class CommandJSONErrorTests: XCTestCase {
     func testUsageErrorIsJSONWhenJSONWasRequested() throws {
         let result = try runCLI(arguments: ["submit", "--json"])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -27,7 +27,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -49,7 +49,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--simulator-id", "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -73,7 +73,7 @@ final class CommandJSONErrorTests: XCTestCase {
             environment: ["XCSTEWARD_HOME": stateRoot.path]
         )
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -93,7 +93,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -129,7 +129,7 @@ final class CommandJSONErrorTests: XCTestCase {
         for testCase in cases {
             let result = try runCLI(arguments: testCase.arguments)
 
-            XCTAssertEqual(result.status, 1, testCase.arguments.joined(separator: " "))
+            XCTAssertEqual(result.status, 2, testCase.arguments.joined(separator: " "))
             XCTAssertEqual(result.stdout, "", testCase.arguments.joined(separator: " "))
             let error = try commandError(from: result.stderr)
             XCTAssertEqual(error["code"] as? String, "usage", testCase.arguments.joined(separator: " "))
@@ -143,7 +143,7 @@ final class CommandJSONErrorTests: XCTestCase {
 
         let result = try runCLI(arguments: ["status", "--state-root", stateRoot.path, "missing-job", "--json"])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 3)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "not_found")
@@ -168,7 +168,7 @@ final class CommandJSONErrorTests: XCTestCase {
             environment: fakeTools.env
         )
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 4)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "invalid_configuration")
@@ -186,7 +186,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "usage")
@@ -205,7 +205,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 5)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "state_root_unavailable")
@@ -233,7 +233,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 5)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "state_root_unavailable")
@@ -254,7 +254,7 @@ final class CommandJSONErrorTests: XCTestCase {
             "--json",
         ])
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 5)
         XCTAssertEqual(result.stdout, "")
         let error = try commandError(from: result.stderr)
         XCTAssertEqual(error["code"] as? String, "state_root_unavailable")

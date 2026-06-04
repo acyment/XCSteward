@@ -271,7 +271,7 @@ final class DoctorCoreSimulatorCommandTests: XCTestCase {
             "--json",
         ], environment: fakeTools.env)
 
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 2)
         XCTAssertEqual(result.stdout, "")
         let envelope = try XCTUnwrap(parseJSON(result.stderr) as? [String: Any])
         let error = try XCTUnwrap(envelope["error"] as? [String: Any])

@@ -316,7 +316,7 @@ public struct XCStewardApp {
                 workerExecutableURL: workerExecutableURL
             )
             try printJob(terminal, json: options.json)
-            return terminal.state == .succeeded ? 0 : 1
+            return exitCode(for: terminal.resultClass, state: terminal.state)
         }
 
         do {
@@ -344,7 +344,7 @@ public struct XCStewardApp {
             throw XCStewardError.notFound("Job \(jobID) not found")
         }
         try printJob(job, json: json)
-        return job.state == .succeeded ? 0 : (job.state.isTerminal ? 1 : 0)
+        return exitCode(for: job.resultClass, state: job.state)
     }
 
     private func handleJobs(arguments: [String], store: StateStore) throws -> Int32 {
@@ -355,7 +355,10 @@ public struct XCStewardApp {
         }
         let jobs = try store.listJobs()
         if json {
-            let summaries = jobs.map(jobOutput(from:))
+            // Full JobSummary per job (same shape as `status --json`), so agents
+            // get one consistent object everywhere. Bare array; each element
+            // carries schema_version.
+            let summaries = try jobs.map { try loadSummary(for: $0) }
             FileHandle.standardOutput.write(try jsonData(summaries))
         } else {
             for job in jobs {
@@ -582,7 +585,7 @@ public struct XCStewardApp {
         } else {
             printDoctorReport(report)
         }
-        return report.overallStatus == .fail ? 1 : 0
+        return report.overallStatus == .fail ? ExitCode.doctorFailed : ExitCode.success
     }
 
     private func handleInternal(arguments: [String], store: StateStore) throws -> Int32 {
@@ -801,7 +804,7 @@ public struct XCStewardApp {
         let failedJob = try store.fetchJob(id: job.id) ?? job
         progress.emit("worker_launch_failed", job: failedJob)
         try printJob(failedJob, json: json)
-        return 1
+        return ExitCode.infraFailure
     }
 
     private func persistPreExecutionFailureEvidence(summary: JobSummary, job: JobRecord) throws {
@@ -832,23 +835,6 @@ public struct XCStewardApp {
         }
     }
 
-    private func jobOutput(from job: JobRecord) -> [String: AnyEncodable] {
-        if let summary = try? loadSummary(for: job) {
-            return [
-                "job_id": AnyEncodable(summary.jobID),
-                "project": AnyEncodable(summary.project),
-                "state": AnyEncodable(summary.state.rawValue),
-                "result_class": AnyEncodable(summary.resultClass?.rawValue),
-            ]
-        }
-        return [
-            "job_id": AnyEncodable(job.id),
-            "project": AnyEncodable(job.project),
-            "state": AnyEncodable(job.state.rawValue),
-            "result_class": AnyEncodable(job.resultClass?.rawValue),
-        ]
-    }
-
     private func printJob(_ job: JobRecord, json: Bool) throws {
         let summary = try loadSummary(for: job)
         if json {
@@ -868,24 +854,5 @@ public struct XCStewardApp {
             return try decodeJSON(JobSummary.self, from: environment.fileSystem.readData(from: summaryURL))
         }
         return JobSummaryFactory().fallbackSummary(job: job)
-    }
-}
-
-private struct AnyEncodable: Encodable {
-    private let encodeFunction: (Encoder) throws -> Void
-
-    init<T: Encodable>(_ value: T?) {
-        self.encodeFunction = { encoder in
-            var container = encoder.singleValueContainer()
-            if let value {
-                try container.encode(value)
-            } else {
-                try container.encodeNil()
-            }
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        try encodeFunction(encoder)
     }
 }

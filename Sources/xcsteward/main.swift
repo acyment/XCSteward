@@ -18,11 +18,17 @@ do {
     } else {
         FileHandle.standardError.write(Data("\(error)\n".utf8))
     }
-    exit(1)
+    exit(exitCode(for: error))
 }
 
 private struct CommandErrorEnvelope: Encodable {
     var error: CommandErrorPayload
+    var schemaVersion: Int = xcstewardSchemaVersion
+
+    enum CodingKeys: String, CodingKey {
+        case error
+        case schemaVersion = "schema_version"
+    }
 }
 
 private struct CommandErrorPayload: Encodable {
@@ -42,25 +48,5 @@ private func writeJSONError(_ error: Error) {
         FileHandle.standardError.write(Data("\n".utf8))
     } catch {
         FileHandle.standardError.write(Data("\(error)\n".utf8))
-    }
-}
-
-private func errorCode(for error: Error) -> String {
-    guard let stewardError = error as? XCStewardError else {
-        return "unexpected_error"
-    }
-    switch stewardError {
-    case .usage:
-        return "usage"
-    case .notFound:
-        return "not_found"
-    case .invalidConfiguration:
-        return "invalid_configuration"
-    case .stateRootUnavailable:
-        return "state_root_unavailable"
-    case .commandFailed:
-        return "command_failed"
-    case .canceled:
-        return "canceled"
     }
 }

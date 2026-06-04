@@ -331,6 +331,37 @@ public struct JobArtifacts: Codable, Sendable {
     public var diagnostics: String?
     public var junit: String?
     public var commandEvents: String?
+    public var schemaVersion: Int = xcstewardSchemaVersion
+
+    // Existing keys keep their camelCase names; only schema_version is mapped.
+    enum CodingKeys: String, CodingKey {
+        case xcresult
+        case combinedLog
+        case buildLog
+        case testLog
+        case derivedData
+        case diagnostics
+        case junit
+        case commandEvents
+        case schemaVersion = "schema_version"
+    }
+}
+
+extension JobArtifacts {
+    // Tolerate older summary.json without schema_version. Extension keeps the
+    // synthesized memberwise initializer available to producers.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.xcresult = try c.decodeIfPresent(String.self, forKey: .xcresult)
+        self.combinedLog = try c.decodeIfPresent(String.self, forKey: .combinedLog)
+        self.buildLog = try c.decodeIfPresent(String.self, forKey: .buildLog)
+        self.testLog = try c.decodeIfPresent(String.self, forKey: .testLog)
+        self.derivedData = try c.decodeIfPresent(String.self, forKey: .derivedData)
+        self.diagnostics = try c.decodeIfPresent(String.self, forKey: .diagnostics)
+        self.junit = try c.decodeIfPresent(String.self, forKey: .junit)
+        self.commandEvents = try c.decodeIfPresent(String.self, forKey: .commandEvents)
+        self.schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? xcstewardSchemaVersion
+    }
 }
 
 public struct JobCounts: Codable, Sendable {
@@ -361,6 +392,7 @@ public struct JobSummary: Codable, Sendable {
     public var artifacts: JobArtifacts
     public var summaryLine: String
     public var metadata: [String: String]
+    public var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
@@ -379,6 +411,33 @@ public struct JobSummary: Codable, Sendable {
         case artifacts
         case summaryLine = "summary_line"
         case metadata
+        case schemaVersion = "schema_version"
+    }
+}
+
+extension JobSummary {
+    // Custom decoder so summary.json written before `schema_version` existed
+    // still decodes (defaults to the current version). Lives in an extension to
+    // preserve the synthesized memberwise initializer used internally.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.jobID = try c.decode(String.self, forKey: .jobID)
+        self.project = try c.decode(String.self, forKey: .project)
+        self.state = try c.decode(JobState.self, forKey: .state)
+        self.resultClass = try c.decodeIfPresent(ResultClass.self, forKey: .resultClass)
+        self.exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode)
+        self.submittedAt = try c.decode(Double.self, forKey: .submittedAt)
+        self.startedAt = try c.decodeIfPresent(Double.self, forKey: .startedAt)
+        self.finishedAt = try c.decodeIfPresent(Double.self, forKey: .finishedAt)
+        self.durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        self.testPlan = try c.decodeIfPresent(String.self, forKey: .testPlan)
+        self.onlyTesting = try c.decodeIfPresent([String].self, forKey: .onlyTesting) ?? []
+        self.simulatorID = try c.decodeIfPresent(String.self, forKey: .simulatorID)
+        self.counts = try c.decodeIfPresent(JobCounts.self, forKey: .counts)
+        self.artifacts = try c.decode(JobArtifacts.self, forKey: .artifacts)
+        self.summaryLine = try c.decode(String.self, forKey: .summaryLine)
+        self.metadata = try c.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
+        self.schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? xcstewardSchemaVersion
     }
 }
 
@@ -465,10 +524,12 @@ public struct DoctorReport: Codable, Sendable {
     public var overallStatus: DoctorStatus
     public var checks: [DoctorCheck]
     public var profilesChecked: [String]
+    public var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
         case overallStatus = "overall_status"
         case checks
         case profilesChecked = "profiles_checked"
+        case schemaVersion = "schema_version"
     }
 }

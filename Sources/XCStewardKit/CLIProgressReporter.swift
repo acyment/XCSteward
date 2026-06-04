@@ -16,6 +16,7 @@ struct CLIProgressEvent: Encodable {
     var simulatorID: String?
     var checkID: String?
     var status: String?
+    var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
         case event
@@ -30,6 +31,7 @@ struct CLIProgressEvent: Encodable {
         case simulatorID = "simulator_id"
         case checkID = "check_id"
         case status
+        case schemaVersion = "schema_version"
     }
 }
 

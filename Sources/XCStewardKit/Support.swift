@@ -525,6 +525,85 @@ public enum XCStewardError: Error, CustomStringConvertible {
     }
 }
 
+/// Version of the machine-readable JSON contract emitted on stdout/stderr.
+/// Bump ONLY on breaking changes (removed/renamed/retyped field, changed enum
+/// meaning, or changed exit-code meaning). Additive changes do not bump it.
+/// See CONTRACT.md.
+public let xcstewardSchemaVersion = 1
+
+/// Stable process exit codes. `0` = success; everything else is a failure.
+/// Documented in CONTRACT.md. Ranges: 1 generic, 2-9 CLI/usage errors,
+/// 10-19 job outcomes, 20-29 command diagnostics, 30+ reserved.
+public enum ExitCode {
+    public static let success: Int32 = 0
+    public static let generic: Int32 = 1
+    public static let usage: Int32 = 2
+    public static let notFound: Int32 = 3
+    public static let invalidConfiguration: Int32 = 4
+    public static let stateRootUnavailable: Int32 = 5
+    public static let canceled: Int32 = 6 // operation aborted (XCStewardError.canceled)
+    public static let commandFailed: Int32 = 7
+    public static let testFailure: Int32 = 10 // test_failure / build_failure
+    public static let testTimeout: Int32 = 11 // test_timeout / build_timeout
+    public static let infraFailure: Int32 = 12 // runner_bootstrap / artifact failure
+    public static let jobCanceled: Int32 = 13 // terminal job canceled
+    public static let internalError: Int32 = 14 // internal_error / unsupported_destination
+    public static let doctorFailed: Int32 = 20
+}
+
+/// Stable string code for an error (mirrors the exit code; emitted in the
+/// `--json` error envelope). Keep these strings stable — they are part of the
+/// contract and asserted by tests.
+public func errorCode(for error: Error) -> String {
+    guard let stewardError = error as? XCStewardError else {
+        return "unexpected_error"
+    }
+    switch stewardError {
+    case .usage: return "usage"
+    case .notFound: return "not_found"
+    case .invalidConfiguration: return "invalid_configuration"
+    case .stateRootUnavailable: return "state_root_unavailable"
+    case .commandFailed: return "command_failed"
+    case .canceled: return "canceled"
+    }
+}
+
+/// Process exit code for a thrown error (see CONTRACT.md exit-code table).
+public func exitCode(for error: Error) -> Int32 {
+    guard let stewardError = error as? XCStewardError else {
+        return ExitCode.generic
+    }
+    switch stewardError {
+    case .usage: return ExitCode.usage
+    case .notFound: return ExitCode.notFound
+    case .invalidConfiguration: return ExitCode.invalidConfiguration
+    case .stateRootUnavailable: return ExitCode.stateRootUnavailable
+    case .commandFailed: return ExitCode.commandFailed
+    case .canceled: return ExitCode.canceled
+    }
+}
+
+/// Process exit code for a job's terminal outcome (used by submit --wait and
+/// status). Non-terminal jobs are not a failure → `0`.
+public func exitCode(for resultClass: ResultClass?, state: JobState) -> Int32 {
+    guard state.isTerminal else { return ExitCode.success }
+    guard let resultClass else {
+        switch state {
+        case .succeeded: return ExitCode.success
+        case .canceled: return ExitCode.jobCanceled
+        default: return ExitCode.generic
+        }
+    }
+    switch resultClass {
+    case .success: return ExitCode.success
+    case .testFailure, .buildFailure: return ExitCode.testFailure
+    case .testTimeout, .buildTimeout: return ExitCode.testTimeout
+    case .runnerBootstrapFailure, .artifactFailure: return ExitCode.infraFailure
+    case .canceled: return ExitCode.jobCanceled
+    case .internalError, .unsupportedDestination: return ExitCode.internalError
+    }
+}
+
 public func defaultStateRoot(environment: [String: String]) -> URL {
     if let custom = environment["XCSTEWARD_HOME"], !custom.isEmpty {
         return URL(fileURLWithPath: custom)
