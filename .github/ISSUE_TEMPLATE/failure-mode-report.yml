@@ -1,0 +1,204 @@
+name: "🧪 Failure-mode report (start here)"
+description: Report a real, reproducible local Xcode / Simulator / XCTest execution failure.
+title: "[failure mode] "
+labels: ["failure-mode"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a real failure mode — this is the most valuable feedback for the alpha.
+
+        This is for **operational fragility** around local test execution: simulator readiness,
+        destination selection, `simctl` / CoreSimulatorService lifecycle, cleanup, timeouts,
+        local CI-like workflows, and coding agents running iOS tests. Single-run fragility counts;
+        concurrency tends to amplify it.
+
+        It is **not** the place for broken tests, app/UI-test bugs, code signing, missing runtimes,
+        or vendor image bugs — XCSteward does not address those.
+
+        Fill in what you can; partial reports are still useful.
+  - type: textarea
+    id: actual
+    attributes:
+      label: What hung or failed (actual behavior)
+      description: What actually happened — where it stalled or errored.
+      placeholder: "xcodebuild test sat at 'Resolving destination' for ~4 min with no test output, then I cancelled."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: "The destination resolves and the test run starts within a few seconds."
+    validations:
+      required: false
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command or workflow
+      description: The exact invocation (xcsteward, xcodebuild, xcrun simctl, fastlane, …).
+      render: shell
+      placeholder: |
+        xcsteward run --scheme App --destination 'platform=iOS Simulator,name=iPhone 16'
+        # or the raw xcodebuild / simctl command
+    validations:
+      required: true
+  - type: checkboxes
+    id: what-failed
+    attributes:
+      label: What hung or failed?
+      description: Tick everything that applies.
+      options:
+        - label: xcodebuild
+        - label: simctl
+        - label: Simulator app
+        - label: CoreSimulatorService
+        - label: test runner
+        - label: cleanup / teardown
+        - label: XCSteward itself
+        - label: unknown
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Where did it run?
+      options:
+        - Local (interactive)
+        - CI-like workflow on a Mac
+        - Hosted CI
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.5 (23F79)"
+    validations:
+      required: true
+  - type: input
+    id: xcode
+    attributes:
+      label: Xcode version
+      description: Include the selected one if it differs (`xcode-select -p`).
+      placeholder: "16.2 (16C5032a)"
+    validations:
+      required: true
+  - type: dropdown
+    id: machine
+    attributes:
+      label: Machine
+      options:
+        - Apple Silicon
+        - Intel
+    validations:
+      required: true
+  - type: input
+    id: xcsteward-version
+    attributes:
+      label: XCSteward version / commit
+      description: Output of `xcsteward --version`, or the commit you built from.
+      placeholder: "v0.1.0-alpha (or commit abc1234)"
+    validations:
+      required: false
+  - type: input
+    id: destination
+    attributes:
+      label: Simulator destination / runtime
+      placeholder: "iPhone 16, iOS 18.2 (UDID if you have it)"
+    validations:
+      required: false
+  - type: dropdown
+    id: booted
+    attributes:
+      label: Did the simulator appear booted?
+      options:
+        - "Yes — reached Booted / home screen"
+        - "No"
+        - "Stuck in Booting"
+        - "Not sure"
+    validations:
+      required: false
+  - type: dropdown
+    id: agents
+    attributes:
+      label: Were coding agents involved?
+      options:
+        - "No"
+        - "Yes — one agent"
+        - "Yes — multiple agents"
+    validations:
+      required: false
+  - type: dropdown
+    id: shared-tooling
+    attributes:
+      label: Could multiple agents / scripts / humans / jobs touch Xcode tooling at the same time?
+      options:
+        - "No — nothing else touching it"
+        - "Maybe"
+        - "Yes"
+    validations:
+      required: false
+  - type: dropdown
+    id: single-run-repro
+    attributes:
+      label: Does it reproduce with a single run, with nothing else touching Xcode tooling?
+      options:
+        - "Yes — happens even on a clean single run"
+        - "No — only with other activity"
+        - "Not sure"
+    validations:
+      required: false
+  - type: dropdown
+    id: concurrency-worse
+    attributes:
+      label: Does concurrent activity make it worse?
+      options:
+        - "Yes — more frequent under concurrency"
+        - "No noticeable difference"
+        - "Not sure"
+    validations:
+      required: false
+  - type: dropdown
+    id: cleanup-helped
+    attributes:
+      label: Did manual cleanup help?
+      description: e.g. killing CoreSimulatorService, `simctl shutdown all`, `erase`.
+      options:
+        - "Yes"
+        - "No"
+        - "Temporarily"
+        - "Did not try"
+    validations:
+      required: false
+  - type: dropdown
+    id: retry-helped
+    attributes:
+      label: Did retrying help?
+      options:
+        - "Yes — passed on retry"
+        - "No — still failed"
+        - "Intermittent"
+        - "Did not try"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / snippets
+      description: Relevant output, a `sample`/spindump, `xcsteward doctor --json`, or a gist link.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: ci-context
+    attributes:
+      label: Tooling / CI context
+      description: Anything relevant — Fastlane, GitHub Actions, Bitrise, CircleCI, Jenkins, Tuist, Bazel, or which agent/runner drove it.
+    validations:
+      required: false
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: How reproducible it is, workarounds tried, related issues.
+    validations:
+      required: false
