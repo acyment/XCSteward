@@ -47,6 +47,19 @@ B starts after A releases the simulator.
 
 No collision. No mystery failures.
 
+## How this differs from Xcode/XCTest MCPs
+
+MCPs let agents invoke Xcode, Simulator, or XCTest tools. XCSteward sits
+underneath that: it coordinates access to fragile local simulator state,
+leases devices, isolates DerivedData and artifacts, preserves logs and
+`.xcresult` bundles, and avoids letting agents, scripts, and humans all
+call `xcodebuild` / `simctl` directly and race on the same simulator.
+
+An MCP that calls `xcodebuild` is a consumer of the simulator subsystem.
+XCSteward is a governor of it. The two are complementary — an agent can
+use an Xcode MCP to drive test runs while XCSteward serialises those runs
+and keeps CoreSimulator healthy underneath.
+
 ## The problem
 
 iOS simulator test execution was designed for one human at a time:
