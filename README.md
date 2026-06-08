@@ -31,6 +31,22 @@ It serializes `xcodebuild` jobs through a lease-backed queue, isolates every job
 - Isolates DerivedData, logs, `.xcresult`, and JSON summaries per job
 - Gives humans and agents a stable CLI contract for test execution
 
+## Quick demo
+
+Two agents, one Mac, same project — submitted at the same time:
+
+```
+agent A → xcsteward submit --project app --wait --json
+agent B → xcsteward submit --project app --wait --json
+```
+
+Agent A gets the simulator lease and runs.  
+Agent B waits in the queue.  
+A finishes with isolated DerivedData, `.xcresult`, and logs.  
+B starts after A releases the simulator.
+
+No collision. No mystery failures.
+
 ## The problem
 
 iOS simulator test execution was designed for one human at a time:
@@ -101,16 +117,20 @@ per command with `--state-root <path>` or set `XCSTEWARD_HOME=<path>`.
 
 ## Quickstart
 
-Create a project profile under the state root:
+Create a project profile from the current repository, then verify and run it:
 
 ```bash
-STATE_ROOT="${XCSTEWARD_HOME:-$HOME/Library/Application Support/XCSteward}"
-mkdir -p "$STATE_ROOT/projects"
-cp Examples/profiles/demo-app.toml.template "$STATE_ROOT/projects/demo-app.toml"
-perl -pi -e "s#__XCSTEWARD_REPO_ROOT__#$PWD#g" "$STATE_ROOT/projects/demo-app.toml"
-xcsteward doctor --project demo-app
-xcsteward submit --project demo-app --wait --json
+xcsteward profile init --detect --simulator-id SIM-UDID --json
+xcsteward doctor --project "$(basename "$PWD")" --json --progress
+xcsteward submit --project "$(basename "$PWD")" --wait --json --progress
 ```
+
+`profile init --detect --json` detects a single `.xcworkspace` or `.xcodeproj`
+and an unambiguous scheme. Its JSON includes `next_commands`; follow those when
+available. If detection reports multiple schemes, rerun with `--scheme <name>`.
+If you do not know the simulator UDID yet, omit `--simulator-id`; the profile is
+still created and `next_commands` will show the first submit shape that needs a
+concrete `--simulator-id`.
 
 For long-running JSON commands, add `--progress` to stream compact events on
 stderr while stdout stays reserved for the final JSON object:
@@ -133,6 +153,7 @@ default_simulator_id = "SIM-UDID"
 After a terminal job, inspect the evidence:
 
 ```bash
+xcsteward explain <job-id> --json
 xcsteward artifacts <job-id> --json
 xcsteward logs <job-id>
 ```
@@ -146,10 +167,17 @@ Agent workflow examples are in [Examples/agents](Examples/agents).
 xcsteward submit --project <name> [--wait] [--wait-timeout 300] [--json]
 xcsteward submit --project <name> --only-testing AppTests/FooTests --skip-testing AppTests/FooTests/testFlaky --wait
 xcsteward submit --project <name> --only-test-configuration Smoke --skip-test-configuration Flaky --wait
+xcsteward submit --project <name> --metadata agent=codex --metadata task=<id> --label smoke --wait --json
+
+# Profiles
+xcsteward projects [--json]
+xcsteward profile show <name> [--json]
+xcsteward profile init --detect [--repo-root .] [--name <name>] [--scheme <scheme>] [--simulator-id <udid>] --json
 
 # Inspect
 xcsteward status <job-id> [--json]
 xcsteward jobs [--json]
+xcsteward explain <job-id> [--json]
 xcsteward logs <job-id>
 xcsteward artifacts <job-id> [--json]
 xcsteward cancel <job-id> [--json]
@@ -157,11 +185,14 @@ xcsteward cancel <job-id> [--json]
 # Maintenance
 xcsteward doctor [--project <name>] [--fix] [--fix-global --dangerously-confirm-global-coresimulator-cleanup] [--json]
 xcsteward cleanup [--dry-run] [--apply] [--older-than 7d] [--keep-last 20] [--max-total-size 50gb] [--json]
+xcsteward cleanup --caches [--dry-run] [--apply] [--json]
 ```
 
 `cleanup` is dry-run by default. It selects terminal jobs under `jobs/`, keeps
 the newest, skips active leases and live PIDs, and respects `--max-total-size`.
-Use `--apply` to delete.
+Use `--apply` to delete. `cleanup --caches` switches to XCSteward-owned cache
+items such as doctor retained evidence and host-health snapshots; it does not
+select job evidence.
 
 `doctor` reports stale worker and simulator leases. `--fix` removes leases
 owned by dead XCSteward processes without touching active ones. Broad
@@ -283,13 +314,18 @@ produced.
       "bytes": 35000000000,
       "reason": "size_budget"
     }
-  ]
+  ],
+  "cache_selected_bytes": 0,
+  "cache_candidate_count": 0,
+  "cache_deleted_count": 0,
+  "cache_candidates": []
 }
 ```
 
 Candidate reasons: `age`, `size_budget`. `bytes` is best-effort allocated disk
 usage with logical file size as fallback. `max_total_bytes` is `null` when not
-supplied.
+supplied. With `cleanup --caches`, job candidates stay empty and
+`cache_candidates` lists XCSteward-owned state-root cache/evidence items.
 
 ### Doctor report
 
@@ -371,9 +407,25 @@ Create and verify:
 STATE_ROOT="${XCSTEWARD_HOME:-$HOME/Library/Application Support/XCSteward}"
 mkdir -p "$STATE_ROOT/projects"
 $EDITOR "$STATE_ROOT/projects/demo.toml"
+xcsteward projects --json
+xcsteward profile show demo --json
 xcsteward doctor --project demo
 xcsteward submit --project demo --wait --wait-timeout 300 --json
 ```
+
+For a simple repository with a single shared project/workspace and an
+unambiguous scheme, agents can create the initial profile noninteractively from
+the repository root:
+
+```bash
+xcsteward profile init --detect --json
+```
+
+The generated document includes `profile.name`, `profile_path`, warnings, and
+`next_commands`. If multiple schemes are shared, rerun with `--scheme <name>`.
+If the agent already knows the simulator, pass `--simulator-id SIM-UDID`;
+otherwise use the `next_commands` submit example with a concrete
+`--simulator-id`.
 
 ### Full example
 
@@ -713,6 +765,13 @@ Clean old terminal jobs without touching active or non-XCSteward state:
 ```bash
 xcsteward cleanup --dry-run --older-than 7d --keep-last 20 --max-total-size 50gb --json
 xcsteward cleanup --apply --older-than 7d --keep-last 20 --max-total-size 50gb --json
+```
+
+Clean XCSteward-owned cache/evidence files without deleting job artifacts:
+
+```bash
+xcsteward cleanup --caches --dry-run --json
+xcsteward cleanup --caches --apply --json
 ```
 
 Remove all XCSteward-local state after stopping active workers:
