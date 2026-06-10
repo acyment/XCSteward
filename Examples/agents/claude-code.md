@@ -23,10 +23,22 @@ while :; do
 done
 
 result_class="$(printf '%s\n' "$status" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result_class"))')"
+explanation="$(xcsteward explain "$job_id" --json || true)"
 artifacts="$(xcsteward artifacts "$job_id" --json || true)"
+printf '%s\n' "$explanation"
 printf '%s\n' "$artifacts"
 printf 'job_id=%s result_class=%s\n' "$job_id" "$result_class"
 ```
+
+For a live terminal view, run `xcsteward status "$job_id" --watch`. For a
+machine-readable stream, add `--json` and parse each newline-delimited
+`JobSummary`. Use `xcsteward logs "$job_id" --follow` when a human wants the
+combined log stream.
+
+If a wait seems hung or quiet, query `xcsteward status "$job_id" --json` or
+`xcsteward jobs --json` before killing it. If `logs` reports no `combined.log`
+yet, the job may still be queued or in simulator/bootstrap setup before
+xcodebuild has written logs.
 
 Cancel a stale queued or running job:
 

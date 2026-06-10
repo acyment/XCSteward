@@ -34,6 +34,8 @@ final class SubmitCommandE2ETests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("--only-test-configuration <name>"))
         XCTAssertTrue(result.stdout.contains("--skip-test-configuration <name>"))
         XCTAssertTrue(result.stdout.contains("--simulator-id <id>"))
+        XCTAssertTrue(result.stdout.contains("--metadata <key=value>"))
+        XCTAssertTrue(result.stdout.contains("--label <value>"))
         XCTAssertTrue(result.stdout.contains("--progress"))
         XCTAssertEqual(result.stderr, "")
     }
@@ -168,6 +170,41 @@ final class SubmitCommandE2ETests: XCTestCase {
         XCTAssertEqual(json["simulator_id"] as? String, "SIM-OVERRIDE")
         let toolLog = try e2e.toolLog()
         XCTAssertTrue(toolLog.contains("-destination id=SIM-OVERRIDE"))
+    }
+
+    func testSubmitWaitSuccessWithMetadataIsPersistedInSummaryAndRunMetadata() throws {
+        let e2e = try E2EScenario(scenario: .success)
+        try e2e.writeProfile(body: """
+        project_path = "App.xcodeproj"
+        scheme = "Demo"
+        default_simulator_id = "SIM-123"
+        """)
+
+        let result = try e2e.submit(
+            wait: true,
+            extraArguments: [
+                "--metadata", "agent=codex",
+                "--metadata", "task=login-fix",
+                "--label", "smoke",
+            ]
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let json = try result.jsonObject()
+        let metadata = try XCTUnwrap(json["metadata"] as? [String: String])
+        XCTAssertEqual(metadata, [
+            "agent": "codex",
+            "task": "login-fix",
+            "label": "smoke",
+        ])
+
+        let jobID = try e2e.jobID(from: json)
+        let runMetadata = try XCTUnwrap(
+            parseJSON(String(contentsOf: e2e.jobDir(jobID).appendingPathComponent("artifacts/run-metadata.json"))) as? [String: Any]
+        )
+        let request = try XCTUnwrap(runMetadata["request"] as? [String: Any])
+        let requestMetadata = try XCTUnwrap(request["metadata"] as? [String: String])
+        XCTAssertEqual(requestMetadata, metadata)
     }
 }
 

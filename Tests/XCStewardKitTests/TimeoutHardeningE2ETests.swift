@@ -78,4 +78,41 @@ final class TimeoutHardeningE2ETests: XCTestCase {
         )
         XCTAssertEqual(testCommand["timed_out"] as? Bool, true)
     }
+
+    func testPreXCTestTimeoutIsRunnerBootstrapFailureWithDiagnosticExcerpt() throws {
+        let e2e = try E2EScenario(scenario: .preXCTestTimeout)
+        try e2e.writeProfile(body: """
+        project_path = "App.xcodeproj"
+        scheme = "Demo"
+        default_simulator_id = "SIM-123"
+        [timeouts]
+        boot = 30
+        build = 30
+        test = 1
+        """)
+
+        let result = try e2e.submit(wait: true)
+
+        XCTAssertNotEqual(result.status, 0)
+        let json = try result.jsonObject()
+        XCTAssertEqual(json["state"] as? String, "failed")
+        XCTAssertEqual(json["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("XCTest did not attach before the test command timed out") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("not a test case timeout") == true)
+
+        let diagnostic = try XCTUnwrap(json["diagnostic_excerpt"] as? [String: Any])
+        XCTAssertEqual(diagnostic["subtype"] as? String, "pre_xctest_timeout")
+        XCTAssertEqual(diagnostic["phase"] as? String, "test")
+        XCTAssertEqual((diagnostic["timeout_seconds"] as? NSNumber)?.intValue, 1)
+        XCTAssertTrue((diagnostic["excerpt"] as? String)?.contains("IDERunDestination") == true)
+        let evidencePaths = try XCTUnwrap(diagnostic["evidence_paths"] as? [String])
+        XCTAssertTrue(evidencePaths.contains { $0.hasSuffix("logs/test.log") }, "\(evidencePaths)")
+        XCTAssertTrue(evidencePaths.contains { $0.hasSuffix("artifacts/command-events.jsonl") }, "\(evidencePaths)")
+
+        let jobID = try e2e.jobID(from: json)
+        let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: e2e.jobDir(jobID).appendingPathComponent("artifacts/run-metadata.json"))) as? [String: Any])
+        XCTAssertEqual(runMetadata["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertEqual(runMetadata["timed_out"] as? Bool, true)
+        XCTAssertEqual((runMetadata["diagnostic_excerpt"] as? [String: Any])?["subtype"] as? String, "pre_xctest_timeout")
+    }
 }

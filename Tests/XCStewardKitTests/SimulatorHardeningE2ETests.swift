@@ -22,6 +22,8 @@ final class SimulatorHardeningE2ETests: XCTestCase {
         XCTAssertEqual(json["simulator_id"] as? String, "SIM-123")
         XCTAssertTrue((json["summary_line"] as? String)?.contains("Unable to boot simulator SIM-123") == true)
         XCTAssertTrue((json["summary_line"] as? String)?.contains("Invalid device: SIM-123") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("before XCTest attached") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("environment failure") == true)
 
         let jobID = try e2e.jobID(from: json)
         let logs = try e2e.logs(jobID)
@@ -40,13 +42,15 @@ final class SimulatorHardeningE2ETests: XCTestCase {
         let bootCommand = try command(in: commands, tool: "xcrun", arguments: ["simctl", "boot", "SIM-123"])
         XCTAssertEqual(integer(bootCommand["exit_code"]), 70)
         XCTAssertEqual(bootCommand["timed_out"] as? Bool, false)
-        XCTAssertFalse(commands.contains { ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "build" && ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "test" && ($0["tool"] as? String) == "xcodebuild" })
 
         let toolLog = try e2e.toolLog()
         XCTAssertFalse(toolLog.contains("xcrun simctl erase SIM-123"))
         XCTAssertFalse(toolLog.contains("xcrun simctl delete"))
         XCTAssertFalse(toolLog.contains("-destination id=SIM-123"))
-        XCTAssertFalse(toolLog.contains("xcodebuild -project"))
+        XCTAssertFalse(toolLog.contains("build-for-testing"))
+        XCTAssertFalse(toolLog.contains("test-without-building"))
     }
 
     func testBootstatusFailureKeepsEvidenceAndDoesNotRunXcodebuild() throws {
@@ -66,6 +70,8 @@ final class SimulatorHardeningE2ETests: XCTestCase {
         XCTAssertEqual(json["simulator_id"] as? String, "SIM-123")
         XCTAssertTrue((json["summary_line"] as? String)?.contains("Unable to confirm simulator boot status for SIM-123") == true)
         XCTAssertTrue((json["summary_line"] as? String)?.contains("Waiting on Data Migration") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("before XCTest attached") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("environment failure") == true)
 
         let jobID = try e2e.jobID(from: json)
         let logs = try e2e.logs(jobID)
@@ -86,13 +92,15 @@ final class SimulatorHardeningE2ETests: XCTestCase {
         let bootstatusCommand = try command(in: commands, tool: "xcrun", arguments: ["simctl", "bootstatus", "SIM-123", "-b"])
         XCTAssertEqual(integer(bootstatusCommand["exit_code"]), 75)
         XCTAssertEqual(bootstatusCommand["timed_out"] as? Bool, false)
-        XCTAssertFalse(commands.contains { ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "build" && ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "test" && ($0["tool"] as? String) == "xcodebuild" })
 
         let toolLog = try e2e.toolLog()
         XCTAssertFalse(toolLog.contains("xcrun simctl erase SIM-123"))
         XCTAssertFalse(toolLog.contains("xcrun simctl delete"))
         XCTAssertFalse(toolLog.contains("-destination id=SIM-123"))
-        XCTAssertFalse(toolLog.contains("xcodebuild -project"))
+        XCTAssertFalse(toolLog.contains("build-for-testing"))
+        XCTAssertFalse(toolLog.contains("test-without-building"))
     }
 
     func testCancellationDuringSimulatorBootTerminatesBootAndReleasesLease() throws {
@@ -145,7 +153,8 @@ final class SimulatorHardeningE2ETests: XCTestCase {
         let bootCommand = try command(in: commands, tool: "xcrun", arguments: ["simctl", "boot", "SIM-123"])
         XCTAssertEqual(integer(bootCommand["exit_code"]), 143)
         XCTAssertEqual(bootCommand["timed_out"] as? Bool, false)
-        XCTAssertFalse(commands.contains { ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "build" && ($0["tool"] as? String) == "xcodebuild" })
+        XCTAssertFalse(commands.contains { ($0["phase"] as? String) == "test" && ($0["tool"] as? String) == "xcodebuild" })
     }
 
     func testXcodebuildUnavailableFailsBeforeSimulatorMutation() throws {

@@ -17,8 +17,10 @@ so tools and coding agents can drive it without scraping human text.
 
 ## Global invariants
 
-- A `--json` command writes **exactly one JSON document to stdout**. Human
-  (non-`--json`) output also goes to stdout.
+- A `--json` command writes **exactly one JSON document to stdout**, except
+  documented streaming modes such as `status --watch --json`, which write
+  newline-delimited JSON documents. Human (non-`--json`) output also goes to
+  stdout.
 - Diagnostics, the `--json` error envelope, and `--progress` events go to
   **stderr**.
 - If a `--json` command fails before producing its object, stdout is empty and a
@@ -39,24 +41,70 @@ so tools and coding agents can drive it without scraping human text.
 | Command | Purpose | `--json` output | Notable exit codes |
 |---|---|---|---|
 | `submit --project <p> [--wait]` | Queue (optionally wait for) a test job | JobSummary | 0; 10/11/12/13/14 with `--wait`; 7 on wait timeout |
-| `status <job-id>` | Show a job summary | JobSummary | 0 non-terminal/success; 10–14 by outcome |
+| `projects` | List configured project profiles | ProjectListDocument | 0 |
+| `profile show <name>` | Show a materialized project profile | ProfileShowDocument | 0; 3/4 on missing or invalid profile |
+| `profile init [--repo-root <p>] --detect` | Create a detected project profile | ProfileInitDocument | 0; 4/7 on detection failures |
+| `status <job-id> [--watch]` | Show a job summary; with `--watch`, poll until terminal | JobSummary; `--watch --json` emits NDJSON JobSummary objects | 0 non-terminal/success; 10–14 by outcome |
 | `jobs` | List all jobs | Array of JobSummary | 0 |
+| `explain <job-id>` | Explain a job outcome and useful evidence | ExplainDocument | 0; 3 on missing job |
 | `artifacts <job-id>` | Artifact paths for a job | JobArtifacts | 0 |
-| `logs <job-id>` | Print combined log (raw) | — | 0 |
+| `logs <job-id> [--follow]` | Print combined log (raw); with `--follow`, stream until terminal | — | 0 |
 | `cancel <job-id>` | Cancel a job | JobSummary | **0 on success** (state in JSON) |
-| `cleanup [--apply]` | Prune old terminal jobs | CleanupReport | 0 |
+| `cleanup [--apply]` | Prune old terminal jobs or, with `--caches`, XCSteward-owned cache items | CleanupReport | 0 |
 | `doctor [--project <p>] [--fix]` | Environment diagnostics | DoctorReport | 0; **20** when overall status is `fail` |
 
 `jobs --json` returns a **bare array of full `JobSummary` objects** (same shape
 as `status --json`); each element carries its own `schema_version`.
 
+`status --watch --json` returns newline-delimited full `JobSummary` objects on
+stdout. One-shot `status --json` remains a single JSON object.
+
+`submit` accepts repeatable `--metadata <key=value>` and `--label <value>`,
+which is equivalent to `--metadata label=<value>`. Metadata is preserved in
+`JobSummary.metadata` and terminal `artifacts/run-metadata.json` under
+`request.metadata`.
+
+`submit` also accepts repeatable `--env <KEY=VALUE>`. These values override
+profile `[env]` for that job's tool invocations only. Terminal
+`artifacts/run-metadata.json` records `request.env_override_keys` only; it does
+not copy env override values.
+
+`submit --wait --json --progress` emits experimental JSON-line progress events
+on stderr. When command events are available, progress events include additive
+`phase` and `phase_elapsed_seconds` fields.
+
 ## JSON shapes (stable fields)
+
+**ProjectListDocument** — `state_root`, `projects_root`, `projects[]`
+(`name`, `path`, `load_status`, optional `error_code`/`error_message`,
+optional `repo_root`/`project_path`/`workspace_path`/`scheme`),
+`schema_version`.
+
+**ProfileShowDocument** — `path`, `profile` (materialized profile settings),
+`schema_version`.
+
+**ProfileInitDocument** — `profile_path`, `created`, `warnings[]`,
+`next_commands[]`, `profile` (materialized profile settings), `schema_version`.
+
+**ExplainDocument** — `job_id`, `project`, `state`, `result_class`,
+`exit_code`, `summary_line`, `retry_policy` (`auto_retry`,
+`max_auto_retries`, `reason`), `recommended_action`, `artifacts`, `failed_tests[]`
+(`class_name`, `name`, `failure_kind`, `message`), `build_issues[]`
+(`source`, `path`, `line_number`, `text`), `log_excerpts[]` (`source`, `path`,
+`line_count`, `excerpt`), `warnings[]`, `summary`, `schema_version`.
 
 **JobSummary** — `job_id`, `project`, `state`, `result_class`, `exit_code`,
 `submitted_at`, `started_at`, `finished_at`, `duration_seconds`, `test_plan`,
 `only_testing`, `simulator_id`, `counts` (`tests_run`/`tests_failed`/`tests_skipped`),
-`artifacts` (JobArtifacts), `summary_line`, `metadata`, `schema_version`.
+`artifacts` (JobArtifacts), `summary_line`, `metadata`, `diagnostic_excerpt`,
+`schema_version`.
 Timestamps are Unix epoch seconds; nullable fields are present even when unknown.
+
+**JobDiagnosticExcerpt** — omitted or null when absent. When present, `subtype`,
+`phase`, `phase_elapsed_seconds`, `timeout_seconds`, `evidence_paths[]`,
+`excerpt`.
+For a test command timeout before XCTest attaches, `subtype` is
+`pre_xctest_timeout` and `result_class` remains `runner_bootstrap_failure`.
 
 **JobArtifacts** — `xcresult`, `combinedLog`, `buildLog`, `testLog`,
 `derivedData`, `diagnostics`, `junit`, `commandEvents`, `schema_version`
@@ -68,7 +116,9 @@ Timestamps are Unix epoch seconds; nullable fields are present even when unknown
 
 **CleanupReport** — `dry_run`, `older_than_seconds`, `keep_last`,
 `max_total_bytes`, `cutoff`, `total_managed_bytes`, `selected_bytes`,
-`candidate_count`, `deleted_count`, `candidates[]`, `schema_version`.
+`candidate_count`, `deleted_count`, `candidates[]`, `cache_selected_bytes`,
+`cache_candidate_count`, `cache_deleted_count`, `cache_candidates[]`,
+(`path`, `kind`, `deleted`, `bytes`, `reason`), `schema_version`.
 
 **Error envelope** — `{ "error": { "code", "message" }, "schema_version" }`.
 
@@ -78,6 +128,9 @@ Timestamps are Unix epoch seconds; nullable fields are present even when unknown
 - `result_class`: `success`, `build_failure`, `build_timeout`, `test_failure`,
   `test_timeout`, `unsupported_destination`, `runner_bootstrap_failure`,
   `artifact_failure`, `canceled`, `internal_error`.
+- `runner_bootstrap_failure` includes environment/runner failures before XCTest
+  attaches, including simulator boot/launch failures and test command timeouts
+  before attach evidence is observed.
 - `doctor` `status`: `pass`, `warn`, `fail`.
 
 ## Exit codes
@@ -125,3 +178,23 @@ resulting job state (read `state` from its JSON).
 - **schema_version 1** — initial published contract. Added `schema_version` to
   all JSON documents; introduced the richer exit-code table (previously `0`/`1`);
   `jobs --json` widened from a reduced object to full `JobSummary` objects.
+- **schema_version 1 additive** — added `projects --json`, `profile show
+  --json`, and `profile init --detect --json` for agent-friendly profile
+  discovery and bootstrapping; `profile init` now defaults `--repo-root` to the
+  current directory and emits `next_commands`.
+- **schema_version 1 additive** — added `explain <job-id> --json` for bounded
+  triage of summaries, artifacts, failed tests, build issues, log excerpts, and
+  retry guidance.
+- **schema_version 1 additive** — added repeatable `submit --metadata
+  <key=value>` and `--label <value>` for preserving agent/job ownership hints in
+  `JobSummary.metadata` and run metadata.
+- **schema_version 1 additive** — added `cleanup --caches` plus cache fields in
+  `CleanupReport` for dry-run/apply cleanup of XCSteward-owned state-root cache
+  and retained doctor evidence items without selecting job artifacts.
+- **schema_version 1 additive** — added human wait context/progress for plain
+  `submit --wait`, `status --watch` with NDJSON output under `--json`, and
+  `logs --follow` for streaming combined logs until a job is terminal.
+- **schema_version 1 additive** — added repeatable `submit --env <KEY=VALUE>`,
+  `JobSummary.diagnostic_excerpt`, progress `phase` /
+  `phase_elapsed_seconds`, and `pre_xctest_timeout` diagnostics under
+  `runner_bootstrap_failure` for test command timeouts before XCTest attaches.

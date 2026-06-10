@@ -5,6 +5,63 @@ import Foundation
 import XCTest
 
 final class XcodeManagedConfigurationE2ETests: XCTestCase {
+    func testSubmitEnvOverridesProfileEnvForJobOnly() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let repoRoot = temp.appendingPathComponent("repo")
+        let fakeTools = try makeFakeToolEnvironment(
+            scenario: .success,
+            extraEnv: ["FAKE_TOOL_LOG_ENV_KEYS": "PROFILE_ONLY OVERRIDE_ME CLI_ONLY"]
+        )
+        try createProfile(
+            name: "demo",
+            stateRoot: stateRoot,
+            repoRoot: repoRoot,
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+
+            [env]
+            PROFILE_ONLY = "from-profile"
+            OVERRIDE_ME = "from-profile"
+            """
+        )
+
+        let result = try runCLI(
+            arguments: [
+                "submit",
+                "--state-root", stateRoot.path,
+                "--project", "demo",
+                "--env", "OVERRIDE_ME=from-cli",
+                "--env", "CLI_ONLY=from-cli",
+                "--wait",
+                "--json",
+            ],
+            environment: fakeTools.env
+        )
+
+        XCTAssertEqual(result.status, 0, "stdout: \(result.stdout)\nstderr: \(result.stderr)")
+        let json = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
+        let jobID = try XCTUnwrap(json["job_id"] as? String)
+        let toolLog = try String(contentsOf: fakeTools.log)
+        XCTAssertTrue(toolLog.contains("env PROFILE_ONLY=from-profile"), toolLog)
+        XCTAssertTrue(toolLog.contains("env OVERRIDE_ME=from-cli"), toolLog)
+        XCTAssertTrue(toolLog.contains("env CLI_ONLY=from-cli"), toolLog)
+        let jobOverrideCount = toolLog
+            .split(separator: "\n")
+            .filter { $0 == "env OVERRIDE_ME=from-cli" }
+            .count
+        XCTAssertGreaterThanOrEqual(jobOverrideCount, 2, toolLog)
+
+        let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: stateRoot.appendingPathComponent("jobs/\(jobID)/artifacts/run-metadata.json"))) as? [String: Any])
+        let request = try XCTUnwrap(runMetadata["request"] as? [String: Any])
+        XCTAssertEqual(request["env_override_keys"] as? [String], ["CLI_ONLY", "OVERRIDE_ME"])
+        let combinedLog = try String(contentsOf: stateRoot.appendingPathComponent("jobs/\(jobID)/logs/combined.log"))
+        XCTAssertTrue(combinedLog.contains("XCSteward env overrides: CLI_ONLY, OVERRIDE_ME"), combinedLog)
+        XCTAssertFalse(combinedLog.contains("from-cli"), combinedLog)
+    }
+
     func testTestWithoutBuildingDoesNotLeakTestPlanFlag() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")

@@ -25,6 +25,14 @@ struct CleanupJob: Codable, Sendable {
     }
 }
 
+struct CleanupCache: Codable, Sendable {
+    var path: String
+    var kind: String
+    var deleted: Bool
+    var bytes: Int64?
+    var reason: String
+}
+
 struct CleanupReport: Codable, Sendable {
     var dryRun: Bool
     var olderThanSeconds: TimeInterval
@@ -36,6 +44,10 @@ struct CleanupReport: Codable, Sendable {
     var candidateCount: Int
     var deletedCount: Int
     var candidates: [CleanupJob]
+    var cacheSelectedBytes: Int64
+    var cacheCandidateCount: Int
+    var cacheDeletedCount: Int
+    var cacheCandidates: [CleanupCache]
     var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
@@ -49,6 +61,10 @@ struct CleanupReport: Codable, Sendable {
         case candidateCount = "candidate_count"
         case deletedCount = "deleted_count"
         case candidates
+        case cacheSelectedBytes = "cache_selected_bytes"
+        case cacheCandidateCount = "cache_candidate_count"
+        case cacheDeletedCount = "cache_deleted_count"
+        case cacheCandidates = "cache_candidates"
         case schemaVersion = "schema_version"
     }
 }
@@ -150,7 +166,47 @@ struct CleanupService {
             selectedBytes: selectedBytes,
             candidateCount: candidates.count,
             deletedCount: candidates.filter(\.deleted).count,
-            candidates: candidates
+            candidates: candidates,
+            cacheSelectedBytes: 0,
+            cacheCandidateCount: 0,
+            cacheDeletedCount: 0,
+            cacheCandidates: []
+        )
+    }
+
+    func cleanupCaches(dryRun: Bool) throws -> CleanupReport {
+        let now = environment.clock.now().timeIntervalSince1970
+        var candidates: [CleanupCache] = []
+        for candidate in try cleanupCacheCandidates() {
+            if !dryRun {
+                try environment.fileSystem.removeItem(candidate.path)
+            }
+            candidates.append(CleanupCache(
+                path: candidate.path.path,
+                kind: candidate.kind,
+                deleted: !dryRun,
+                bytes: candidate.bytes,
+                reason: candidate.reason
+            ))
+        }
+        let selectedBytes = candidates.reduce(Int64(0)) { total, cache in
+            total + (cache.bytes ?? 0)
+        }
+        return CleanupReport(
+            dryRun: dryRun,
+            olderThanSeconds: 0,
+            keepLast: 0,
+            maxTotalBytes: nil,
+            cutoff: now,
+            totalManagedBytes: 0,
+            selectedBytes: 0,
+            candidateCount: 0,
+            deletedCount: 0,
+            candidates: [],
+            cacheSelectedBytes: selectedBytes,
+            cacheCandidateCount: candidates.count,
+            cacheDeletedCount: candidates.filter(\.deleted).count,
+            cacheCandidates: candidates
         )
     }
 
@@ -204,6 +260,52 @@ struct CleanupService {
         }
         return total
     }
+
+    private func cleanupCacheCandidates() throws -> [CleanupCacheCandidate] {
+        var candidates: [CleanupCacheCandidate] = []
+        let hostHealth = environment.paths.stateRoot.appendingPathComponent("host-health.json")
+        if cleanupCachePathIsUnderStateRoot(hostHealth), environment.fileSystem.fileExists(hostHealth) {
+            candidates.append(CleanupCacheCandidate(
+                path: hostHealth,
+                kind: "host_health",
+                bytes: cleanupPathSize(hostHealth),
+                reason: "cache"
+            ))
+        }
+        if environment.fileSystem.fileExists(environment.paths.doctorRoot) {
+            let doctorEntries = try environment.fileSystem.contentsOfDirectory(environment.paths.doctorRoot)
+                .sorted { $0.path < $1.path }
+            for entry in doctorEntries where cleanupCachePathIsUnderStateRoot(entry) {
+                candidates.append(CleanupCacheCandidate(
+                    path: entry,
+                    kind: "doctor",
+                    bytes: cleanupPathSize(entry),
+                    reason: "cache"
+                ))
+            }
+        }
+        return candidates
+    }
+
+    private func cleanupCachePathIsUnderStateRoot(_ url: URL) -> Bool {
+        let root = environment.paths.stateRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let candidate = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return candidate == root || candidate.hasPrefix(root + "/")
+    }
+
+    private func cleanupPathSize(_ url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey]) else {
+            return nil
+        }
+        if values.isRegularFile == true {
+            let allocatedSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
+            return Int64(allocatedSize)
+        }
+        if values.isDirectory == true {
+            return cleanupDirectorySize(url)
+        }
+        return values.fileSize.map(Int64.init)
+    }
 }
 
 private struct CleanupCandidate {
@@ -211,4 +313,11 @@ private struct CleanupCandidate {
     var directory: URL
     var bytes: Int64
     var sortTimestamp: Double
+}
+
+private struct CleanupCacheCandidate {
+    var path: URL
+    var kind: String
+    var bytes: Int64?
+    var reason: String
 }

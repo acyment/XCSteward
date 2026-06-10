@@ -154,6 +154,30 @@ xcsteward doctor --project demo-app --json --progress
 xcsteward submit --project demo-app --wait --json --progress
 ```
 
+Submit progress events are JSON lines on stderr and include additive phase
+context when command events are available: `phase` and `phase_elapsed_seconds`.
+
+Plain human `submit --wait` prints the queued job id, status/log commands, job
+directory, and compact wait updates so a long build/test run is not silent. To
+watch an existing job from another terminal, use:
+
+```bash
+xcsteward submit --project demo-app --wait --wait-timeout 900
+xcsteward status <job-id> --watch
+xcsteward logs <job-id> --follow
+```
+
+Human wait output is intentionally compact:
+
+```text
+Queued job 3add0f97-59e1-41da-94d0-8f7c8978efff (queued).
+Status: xcsteward --state-root /path/to/state status 3add0f97-59e1-41da-94d0-8f7c8978efff
+Watch:  xcsteward --state-root /path/to/state status 3add0f97-59e1-41da-94d0-8f7c8978efff --watch
+Logs:   xcsteward --state-root /path/to/state logs 3add0f97-59e1-41da-94d0-8f7c8978efff
+Follow: xcsteward --state-root /path/to/state logs 3add0f97-59e1-41da-94d0-8f7c8978efff --follow
+running 2m31s | simulator C312... | build | last event 12s ago | log /path/to/state/jobs/.../logs/combined.log
+```
+
 For a real app, replace the template with a profile pointing at your repo,
 scheme, and simulator UDID:
 
@@ -172,6 +196,34 @@ xcsteward artifacts <job-id> --json
 xcsteward logs <job-id>
 ```
 
+### Simulator bootstrap failures
+
+XCSteward distinguishes build failures, real test failures, and simulator
+bootstrap/environment failures. If CoreSimulator fails before XCTest attaches
+— for example `Unable to boot the Simulator`, `launchd failed to respond`, or
+`Failed to start launchd_sim` — the job finishes as
+`runner_bootstrap_failure`, not `test_failure`.
+
+If `xcodebuild test-without-building` times out before XCSteward observes
+XCTest attach evidence such as `Testing started`, `Test Suite`, or `Test Case`
+output, the job is also reported as `runner_bootstrap_failure` with a
+`diagnostic_excerpt.subtype` of `pre_xctest_timeout`. The summary line says
+`XCTest did not attach before the test command timed out`, so agents should
+treat it as environment/bootstrap trouble rather than a timed-out test case.
+
+The job summary and human `submit --wait` / `status --watch` output state that
+the run failed before XCTest attached, preserve the underlying CoreSimulator
+detail, and include a bounded remediation hint such as shutting down or erasing
+the selected simulator before retrying once. `explain <job-id> --json` repeats
+that classification and recommended action for agents. Terminal JSON may include
+`diagnostic_excerpt` with the subtype, phase, timeout seconds, evidence paths,
+and a capped log excerpt.
+
+When a job is still queued or in simulator/bootstrap setup, `logs <job-id>` may
+not have a `combined.log` to print yet. In that case XCSteward reports that the
+combined log is pending and points back to `status <job-id> --watch` instead of
+failing with an opaque missing-file error.
+
 Agent workflow examples are in [Examples/agents](Examples/agents).
 
 ## Commands
@@ -182,6 +234,7 @@ xcsteward submit --project <name> [--wait] [--wait-timeout 300] [--json]
 xcsteward submit --project <name> --only-testing AppTests/FooTests --skip-testing AppTests/FooTests/testFlaky --wait
 xcsteward submit --project <name> --only-test-configuration Smoke --skip-test-configuration Flaky --wait
 xcsteward submit --project <name> --metadata agent=codex --metadata task=<id> --label smoke --wait --json
+xcsteward submit --project <name> --env KEY=VALUE --env OTHER=VALUE --wait --json
 
 # Profiles
 xcsteward projects [--json]
@@ -189,10 +242,10 @@ xcsteward profile show <name> [--json]
 xcsteward profile init --detect [--repo-root .] [--name <name>] [--scheme <scheme>] [--simulator-id <udid>] --json
 
 # Inspect
-xcsteward status <job-id> [--json]
+xcsteward status <job-id> [--watch] [--interval 2] [--json]
 xcsteward jobs [--json]
 xcsteward explain <job-id> [--json]
-xcsteward logs <job-id>
+xcsteward logs <job-id> [--follow]
 xcsteward artifacts <job-id> [--json]
 xcsteward cancel <job-id> [--json]
 
@@ -271,15 +324,24 @@ Stable error codes: `usage`, `not_found`, `invalid_configuration`,
     "junit": null
   },
   "summary_line": "UUID queued",
-  "metadata": {}
+  "metadata": {},
+  "diagnostic_excerpt": null
 }
 ```
 
 Stable states: `queued`, `running`, `succeeded`, `failed`, `canceled`,
 `interrupted`. Stable result classes: `success`, `build_failure`,
-`test_failure`, `test_timeout`, `runner_bootstrap_failure`,
-`artifact_failure`, `canceled`, `internal_error`. Timestamps are Unix epoch
-seconds. Nullable fields are present even when unknown.
+`build_timeout`, `test_failure`, `test_timeout`, `unsupported_destination`,
+`runner_bootstrap_failure`, `artifact_failure`, `canceled`, `internal_error`.
+`runner_bootstrap_failure` means the runner/environment failed before XCTest
+attached, such as simulator boot, launch session, `launchd_sim`, destination,
+runner setup failures, or a test command timeout before XCTest attached.
+Timestamps are Unix epoch seconds. Nullable fields are present even when
+unknown.
+
+`status --watch --json` prints newline-delimited `JobSummary` objects until the
+job is terminal. One-shot `status --json` remains a single JSON object. Human
+`status --watch` prints compact state/progress lines at the polling interval.
 
 ### Jobs list
 
@@ -604,7 +666,10 @@ clone_for_shards = true
   `XCSTEWARD_PROJECT`, `XCSTEWARD_PHASE`, and run-scoped `TMPDIR`. Test
   invocations also get `TEST_RUNNER_*` variants. Manual/hybrid shards get
   `XCSTEWARD_SHARD_ID`, `XCSTEWARD_SHARD_INDEX`, `XCSTEWARD_TOTAL_SHARDS`,
-  and matching `TEST_RUNNER_*` variables with separate shard `TMPDIR`.
+  and matching `TEST_RUNNER_*` variables with separate shard `TMPDIR`. Profile
+  `[env]` values are merged into tool invocations; repeatable submit
+  `--env KEY=VALUE` overrides profile env for that job only. Run metadata and
+  command log headers record env override keys, not sensitive values.
 - `--only-testing` / `--skip-testing`: passed directly to Xcode-managed runs.
   Manual/hybrid shards use `--only-testing` as explicit shard input; when none
   provided, enumerated tests are filtered with `--skip-testing` before
@@ -754,6 +819,7 @@ and a live smoke test on that host.
 | Hardening matrix        | [docs/hardening-matrix.md](docs/hardening-matrix.md) |
 | Live dogfood evidence   | [docs/dogfood-ledger.md](docs/dogfood-ledger.md)     |
 | Agent workflow examples | [Examples/agents](Examples/agents)                   |
+| Website update prompt   | [docs/xcsteward-website-update-prompt.md](docs/xcsteward-website-update-prompt.md) |
 | Sample profiles         | [Examples/profiles](Examples/profiles)               |
 | Demo iOS fixture        | [Examples/DemoApp](Examples/DemoApp)                 |
 

@@ -75,6 +75,15 @@ xcsteward --state-root "$STATE_ROOT" doctor --project demo-app --json --progress
 xcsteward --state-root "$STATE_ROOT" submit --project demo-app --wait --wait-timeout 300 --json --progress
 ```
 
+For a human terminal, omit `--json`: plain `submit --wait` prints the queued job
+id, status/log commands, job directory, and compact state updates while the job
+runs. To monitor an already-submitted job from another terminal:
+
+```bash
+xcsteward --state-root "$STATE_ROOT" status <job-id> --watch
+xcsteward --state-root "$STATE_ROOT" logs <job-id> --follow
+```
+
 The demo profile uses a managed simulator. If the configured runtime or device
 type is not installed on the host, edit the profile to match an available
 runtime from:
@@ -125,6 +134,7 @@ Minimal loop:
 summary="$(xcsteward submit --project app --json)"
 job_id="$(printf '%s\n' "$summary" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')"
 xcsteward status "$job_id" --json
+xcsteward status "$job_id" --watch --json  # optional NDJSON stream
 xcsteward artifacts "$job_id" --json
 xcsteward logs "$job_id"
 ```

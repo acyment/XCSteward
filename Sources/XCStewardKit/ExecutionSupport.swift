@@ -7,6 +7,7 @@ struct ToolExecutionContext {
     let profile: ProjectProfile
     let jobID: String
     let store: StateStore
+    var envOverrides: [String: String] = [:]
     var commandLog: URL? = nil
     var commandEventLog: URL? = nil
 }
@@ -14,6 +15,8 @@ struct ToolExecutionContext {
 struct TestOutcome: Sendable {
     var resultClass: ResultClass
     var exitCode: Int32?
+    var summaryLine: String? = nil
+    var diagnosticExcerpt: JobDiagnosticExcerpt? = nil
 }
 
 struct RunCommandRecord: Codable, Sendable {

@@ -26,6 +26,25 @@ final class CLIProgressTests: XCTestCase {
         XCTAssertEqual(terminal["state"] as? String, "succeeded")
     }
 
+    func testSubmitWaitProgressIncludesCommandPhaseContext() throws {
+        let e2e = try E2EScenario(scenario: .slowSuccess)
+        try e2e.writeProfile(body: """
+        project_path = "App.xcodeproj"
+        scheme = "Demo"
+        default_simulator_id = "SIM-123"
+        """)
+
+        let result = try e2e.submit(wait: true, extraArguments: ["--progress", "--wait-timeout", "30"])
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let events = try progressEvents(from: result.stderr)
+        let phaseEvent = try XCTUnwrap(events.first { event in
+            (event["phase"] as? String == "build" || event["phase"] as? String == "test")
+                && event["phase_elapsed_seconds"] != nil
+        }, result.stderr)
+        XCTAssertTrue((phaseEvent["phase_elapsed_seconds"] as? NSNumber)?.doubleValue ?? -1 >= 0, "\(phaseEvent)")
+    }
+
     func testDoctorProgressWritesCheckJSONLinesToStderrWithoutChangingReportStdout() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")

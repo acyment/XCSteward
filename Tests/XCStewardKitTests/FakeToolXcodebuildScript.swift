@@ -24,6 +24,12 @@ extension FakeToolScripts {
                 printf 'env %s=%s\\n' "$KEY" "$VALUE" >> "$LOG"
               fi
             done
+            for KEY in ${FAKE_TOOL_LOG_ENV_KEYS:-}; do
+              VALUE="${!KEY:-}"
+              if [[ -n "$VALUE" ]]; then
+                printf 'env %s=%s\\n' "$KEY" "$VALUE" >> "$LOG"
+              fi
+            done
             if [[ "$*" == "-version" ]]; then
               if [[ "$SCENARIO" == "xcode_version_mismatch" ]]; then
                 cat <<'TXT'
@@ -298,6 +304,17 @@ extension FakeToolScripts {
                 echo "Failed to background test runner" >&2
                 exit 74
               fi
+              if [[ "$SCENARIO" == "launchd_sim_test_bootstrap_failure" ]]; then
+                echo "Testing started"
+                cat <<'TXT' >&2
+            An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=60):
+            Unable to boot the Simulator.
+            launchd failed to respond.
+            Underlying error (domain=com.apple.SimLaunchHostService.RequestError, code=4):
+                Failed to start launchd_sim: could not bind to session, launchd_sim may have crashed or quit responding
+            TXT
+                exit 65
+              fi
               if [[ "$SCENARIO" == "manual_shard_bootstrap_retry" || "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" ]] && mkdir "$ROOT/manual-shard-bootstrap-failed.lock" 2>/dev/null; then
                 if [[ "$SCENARIO" == "manual_shard_bootstrap_retry_with_partial_result" ]]; then
                   mkdir -p "$RESULT"
@@ -328,6 +345,14 @@ extension FakeToolScripts {
                 echo "Testing started"
                 while true; do
                   :
+                done
+              fi
+              if [[ "$SCENARIO" == "pre_xctest_timeout" ]]; then
+                echo "2026-06-09 12:00:00.000 xcodebuild[123:456] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty." >&2
+                echo "xcodebuild test-without-building launched; waiting for XCTest runner" >&2
+                while true; do
+                  sleep 1
+                  echo "2026-06-09 12:00:01.000 xcodebuild[123:456] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty." >&2
                 done
               fi
               if [[ "$SCENARIO" == "test_cancellation" ]]; then

@@ -73,6 +73,7 @@ final class JobExecutor: @unchecked Sendable {
                 profile: profile,
                 jobID: job.id,
                 store: store,
+                envOverrides: job.request.envOverrides,
                 commandLog: paths.commandLog,
                 commandEventLog: paths.commandEventLog
             )
@@ -278,6 +279,12 @@ final class JobExecutor: @unchecked Sendable {
                 }
             }
             let artifacts = paths.artifacts(fileSystem: environment.fileSystem)
+            let diagnosticExcerpt = finalizedDiagnosticExcerpt(
+                from: testOutcome,
+                paths: paths,
+                timeoutSeconds: profile.timeouts.test,
+                finishedAt: finishedAt
+            )
             return try finish(
                 job: job,
                 profile: profile,
@@ -289,7 +296,9 @@ final class JobExecutor: @unchecked Sendable {
                 finishedAt: finishedAt,
                 simulatorID: resolvedSimulatorID,
                 counts: parsedCounts,
-                artifacts: artifacts
+                artifacts: artifacts,
+                summaryLine: finalResultClass == testOutcome.resultClass ? testOutcome.summaryLine : nil,
+                diagnosticExcerpt: diagnosticExcerpt
             )
         } catch {
             if isCancellationError(error) {
@@ -311,6 +320,7 @@ final class JobExecutor: @unchecked Sendable {
                     profile: profile,
                     jobID: job.id,
                     store: store,
+                    envOverrides: job.request.envOverrides,
                     commandLog: paths.commandLog,
                     commandEventLog: paths.commandEventLog
                 )
@@ -321,8 +331,14 @@ final class JobExecutor: @unchecked Sendable {
                 )
             }
             let failureArtifacts = paths.artifacts(fileSystem: environment.fileSystem)
+            let rawSummaryLine = String(describing: error)
+            let failureSimulatorID = simulatorID ?? job.request.simulatorID ?? profile.defaultSimulatorID ?? ""
+            let summaryLine = SimulatorBootstrapFailureDiagnosis.summaryLine(
+                errorDescription: rawSummaryLine,
+                simulatorID: failureSimulatorID
+            ) ?? rawSummaryLine
             _ = try? failAndLog(
-                message: String(describing: error),
+                message: summaryLine,
                 exitCode: 75,
                 logURL: paths.buildLog,
                 combinedLog: paths.combinedLog
@@ -335,9 +351,9 @@ final class JobExecutor: @unchecked Sendable {
                 resultClass: resultClass,
                 exitCode: nil,
                 startedAt: failureStartedAt,
-                simulatorID: simulatorID ?? job.request.simulatorID ?? profile.defaultSimulatorID ?? "",
+                simulatorID: failureSimulatorID,
                 artifacts: failureArtifacts,
-                summaryLine: String(describing: error),
+                summaryLine: summaryLine,
                 includeToolProbes: !isInvalidConfiguration(error)
             )
         }
@@ -413,7 +429,7 @@ final class JobExecutor: @unchecked Sendable {
             return TestOutcome(resultClass: .canceled, exitCode: run.exitCode)
         }
         if shouldRetryBootstrapFailure(run: run) {
-            let firstOutcome = classify(run: run, resultBundle: paths.resultBundle)
+            let firstOutcome = classify(run: run, resultBundle: paths.resultBundle, simulatorID: simulatorID)
             try recordRetryAttemptEvidence(
                 fileSystem: environment.fileSystem,
                 sourceResultBundle: paths.resultBundle,
@@ -445,9 +461,9 @@ final class JobExecutor: @unchecked Sendable {
             if try isCancelRequested(context: context), isCancellationResult(retry) {
                 return TestOutcome(resultClass: .canceled, exitCode: retry.exitCode)
             }
-            return classify(run: retry, resultBundle: paths.resultBundle)
+            return classify(run: retry, resultBundle: paths.resultBundle, simulatorID: simulatorID)
         }
-        return classify(run: run, resultBundle: paths.resultBundle)
+        return classify(run: run, resultBundle: paths.resultBundle, simulatorID: simulatorID)
     }
 
     private func runTest(simulatorID: String, paths: ExecutionPaths, request: JobRequest, context: ToolExecutionContext) throws -> ToolResult {
@@ -553,6 +569,10 @@ final class JobExecutor: @unchecked Sendable {
 
     func classify(run: ToolResult, resultBundle: URL) -> TestOutcome {
         testOutcomeClassifier.classify(run: run, resultBundle: resultBundle)
+    }
+
+    private func classify(run: ToolResult, resultBundle: URL, simulatorID: String?) -> TestOutcome {
+        testOutcomeClassifier.classify(run: run, resultBundle: resultBundle, simulatorID: simulatorID)
     }
 
     func commandFailed(_ message: String, output: String) -> XCStewardError {
@@ -738,7 +758,9 @@ final class JobExecutor: @unchecked Sendable {
                 try? context.store.clearJobProcessID(id: context.jobID)
             }
         }
-        let toolEnvironment = context.profile.env.merging(environmentOverrides) { _, override in override }
+        let toolEnvironment = context.profile.env
+            .merging(context.envOverrides) { _, override in override }
+            .merging(environmentOverrides) { _, override in override }
         do {
             let result = try environment.toolRunner.run(
                 tool: tool,
@@ -824,9 +846,12 @@ final class JobExecutor: @unchecked Sendable {
         let phase = commandPhase(environmentOverrides: environmentOverrides)
         let phasePrefix = phase.map { "\($0) " } ?? ""
         let eventLogLine = context.commandEventLog.map { "\nXCSteward command events: \($0.path)" } ?? ""
+        let envOverrideLine = context.envOverrides.isEmpty
+            ? ""
+            : "\nXCSteward env overrides: \(context.envOverrides.keys.sorted().joined(separator: ", "))"
         let line = """
         XCSteward starting \(phasePrefix)command: \(commandLine(tool: tool, arguments: arguments))
-        XCSteward command timeout: \(formattedTimeout(timeout))\(eventLogLine)
+        XCSteward command timeout: \(formattedTimeout(timeout))\(envOverrideLine)\(eventLogLine)
 
         """
         let data = Data(line.utf8)
@@ -1021,6 +1046,7 @@ final class JobExecutor: @unchecked Sendable {
         counts: JobCounts? = nil,
         artifacts: JobArtifacts,
         summaryLine: String? = nil,
+        diagnosticExcerpt: JobDiagnosticExcerpt? = nil,
         includeToolProbes: Bool = true
     ) throws -> JobSummary {
         let finishedAt = finishedAt ?? environment.clock.now().timeIntervalSince1970
@@ -1036,7 +1062,8 @@ final class JobExecutor: @unchecked Sendable {
             simulatorID: simulatorID,
             counts: counts,
             artifacts: artifacts,
-            summaryLine: summaryLine ?? resultPolicy.summaryLine(for: resultClass)
+            summaryLine: summaryLine ?? resultPolicy.summaryLine(for: resultClass),
+            diagnosticExcerpt: diagnosticExcerpt
         )
         try resultReporter.persistSummary(summary, to: paths.summary)
         try? resultReporter.writeRunMetadata(
@@ -1061,7 +1088,8 @@ final class JobExecutor: @unchecked Sendable {
         simulatorID: String,
         counts: JobCounts?,
         artifacts: JobArtifacts,
-        summaryLine: String
+        summaryLine: String,
+        diagnosticExcerpt: JobDiagnosticExcerpt? = nil
     ) -> JobSummary {
         JobSummary(
             jobID: job.id,
@@ -1079,8 +1107,102 @@ final class JobExecutor: @unchecked Sendable {
             counts: counts,
             artifacts: artifacts,
             summaryLine: summaryLine,
-            metadata: job.request.metadata
+            metadata: job.request.metadata,
+            diagnosticExcerpt: diagnosticExcerpt
         )
+    }
+
+    private func finalizedDiagnosticExcerpt(
+        from outcome: TestOutcome,
+        paths: ExecutionPaths,
+        timeoutSeconds: TimeInterval,
+        finishedAt: Double
+    ) -> JobDiagnosticExcerpt? {
+        guard var diagnostic = outcome.diagnosticExcerpt else {
+            return nil
+        }
+        if diagnostic.phase == nil {
+            diagnostic.phase = "test"
+        }
+        if diagnostic.timeoutSeconds == nil {
+            diagnostic.timeoutSeconds = timeoutSeconds
+        }
+        if diagnostic.phaseElapsedSeconds == nil {
+            diagnostic.phaseElapsedSeconds = phaseElapsedSeconds(
+                phase: diagnostic.phase,
+                finishedAt: finishedAt,
+                commandEventLog: paths.commandEventLog
+            )
+        }
+        if diagnostic.evidencePaths.isEmpty {
+            diagnostic.evidencePaths = diagnosticEvidencePaths(paths: paths)
+        }
+        if diagnostic.excerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            diagnostic.excerpt = diagnosticExcerpt(from: [paths.testLog, paths.combinedLog])
+        }
+        return diagnostic
+    }
+
+    private func diagnosticEvidencePaths(paths: ExecutionPaths) -> [String] {
+        [
+            paths.testLog,
+            paths.combinedLog,
+            paths.commandEventLog,
+            paths.resultBundle,
+        ]
+        .filter { environment.fileSystem.fileExists($0) }
+        .map(\.path)
+    }
+
+    private func diagnosticExcerpt(from urls: [URL]) -> String {
+        for url in urls where environment.fileSystem.fileExists(url) {
+            guard let data = try? environment.fileSystem.readData(from: url),
+                  let text = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            let lines = text
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let excerpt = lines.suffix(40).joined(separator: "\n")
+            if !excerpt.isEmpty {
+                return cappedDiagnosticExcerpt(excerpt)
+            }
+        }
+        return "No XCTest output was observed before the test command timed out."
+    }
+
+    private func cappedDiagnosticExcerpt(_ text: String, limit: Int = 4_000) -> String {
+        guard text.count > limit else {
+            return text
+        }
+        let start = text.index(text.endIndex, offsetBy: -limit)
+        return "[excerpt truncated]\n\(text[start...])"
+    }
+
+    private func phaseElapsedSeconds(phase: String?, finishedAt: Double, commandEventLog: URL) -> Double? {
+        guard let phase,
+              environment.fileSystem.fileExists(commandEventLog),
+              let data = try? environment.fileSystem.readData(from: commandEventLog),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        let events = text
+            .split(separator: "\n")
+            .compactMap { line -> RunCommandEvent? in
+                try? decoder.decode(RunCommandEvent.self, from: Data(line.utf8))
+            }
+        let startEvent = events.first { event in
+            let isStart = event.event == "launching" || event.event == "started"
+            let matchesPhase = event.phase == phase || event.tool == phase
+            return isStart && matchesPhase
+        }
+        let start = startEvent?.timestamp
+        guard let start else {
+            return nil
+        }
+        return max(0, finishedAt - start)
     }
 
     private func isCancelRequested(context: ToolExecutionContext) throws -> Bool {

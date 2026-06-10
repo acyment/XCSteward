@@ -86,6 +86,52 @@ final class ExecutionOutcomeE2ETests: XCTestCase {
         XCTAssertNotEqual(json["result_class"] as? String, "test_failure")
     }
 
+    func testLaunchdSimFailureAfterBuildIsEnvironmentFailureBeforeXCTestAttached() throws {
+        let e2e = try E2EScenario(scenario: .launchdSimTestBootstrapFailure)
+        try e2e.writeProfile(
+            body: """
+            project_path = "App.xcodeproj"
+            scheme = "Demo"
+            default_simulator_id = "SIM-123"
+            """
+        )
+
+        let result = try e2e.submit(wait: true)
+
+        XCTAssertNotEqual(result.status, 0)
+        let json = try result.jsonObject()
+        XCTAssertEqual(json["state"] as? String, "failed")
+        XCTAssertEqual(json["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertNotEqual(json["result_class"] as? String, "test_failure")
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("before XCTest attached") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("environment failure") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("launchd_sim") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("xcrun simctl erase SIM-123") == true)
+
+        let jobID = try e2e.jobID(from: json)
+        let statusJSON = try e2e.status(jobID)
+        XCTAssertEqual(statusJSON["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertTrue((statusJSON["summary_line"] as? String)?.contains("launchd_sim") == true)
+
+        let logs = try e2e.logs(jobID)
+        XCTAssertTrue(logs.contains("Testing started"), logs)
+        XCTAssertTrue(logs.contains("Failed to start launchd_sim"), logs)
+
+        let runMetadata = try XCTUnwrap(parseJSON(String(contentsOf: e2e.jobDir(jobID).appendingPathComponent("artifacts/run-metadata.json"))) as? [String: Any])
+        XCTAssertEqual(runMetadata["result_class"] as? String, "runner_bootstrap_failure")
+        let commands = try XCTUnwrap(runMetadata["commands"] as? [[String: Any]])
+        XCTAssertTrue(commands.contains { command in
+            (command["phase"] as? String) == "build" &&
+                (command["tool"] as? String) == "xcodebuild" &&
+                (command["exit_code"] as? NSNumber)?.intValue == 0
+        }, "\(commands)")
+        let testCommands = commands.filter { ($0["phase"] as? String) == "test" && ($0["tool"] as? String) == "xcodebuild" }
+        XCTAssertEqual(testCommands.count, 2, "\(commands)")
+        XCTAssertEqual((testCommands.first?["exit_code"] as? NSNumber)?.intValue, 65)
+        XCTAssertEqual((testCommands.last?["exit_code"] as? NSNumber)?.intValue, 65)
+        XCTAssertTrue(try e2e.toolLog().contains("xcrun simctl erase SIM-123"))
+    }
+
     func testBuildFailureIsClassified() throws {
         let e2e = try E2EScenario(scenario: .buildFailure)
         try e2e.writeProfile(

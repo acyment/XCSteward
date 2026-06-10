@@ -2,6 +2,29 @@
 
 ## Pending
 
+### Agent developer experience
+
+- [ ] Make XCSteward easier to drive from any coding agent without adding MCP.
+  - Severity: S1 agent DevX.
+  - Rationale: the CLI JSON contract is already the right integration layer; agents still have to rediscover profiles, write polling/classification glue, inspect multiple artifact files, and infer job ownership on shared Macs.
+  - Non-goal: do not add an MCP server or other protocol wrapper unless the CLI contract proves insufficient.
+  - Acceptance criteria: an agent with shell access and a JSON parser can discover the right XCSteward profile, run a bounded job, understand queue/backpressure state, classify the result, inspect a concise failure digest, report artifact paths, and avoid unsafe retries without vendor-specific instructions.
+  - Tasks:
+    - Publish a reusable generic agent skill under `Examples/agents/skills/xcsteward/` that any coding agent can read or adapt.
+    - Add profile discovery commands such as `xcsteward projects --json`, `xcsteward profile show <name> --json`, and a noninteractive `xcsteward profile init --repo-root . --detect --json` path so agents do not infer profile names from prose.
+    - Add one-command triage, e.g. `xcsteward explain <job-id> --json`, returning the job summary, artifacts, failed tests or build issues when available, useful log excerpts, retryability, and recommended next action.
+    - Add CLI metadata support for `submit`, e.g. `--metadata key=value` and possibly `--label`, so jobs can record agent, task, cwd, branch, or external request identifiers without changing the stable summary shape.
+    - Improve queue visibility in status/progress with fields such as `queue_position`, `blocking_job_id`, `effective_max_jobs`, and `backpressure_reason`.
+    - Add generated instruction output, e.g. `xcsteward instructions --project <name> --format agents-md|skill`, so AGENTS snippets and reusable skills stay synchronized with the actual contract.
+    - Consider an explicit agent-friendly exit mode, e.g. `--exit-zero-on-terminal`, that preserves JSON `exit_code`/`result_class` while avoiding shell wrappers losing stdout on expected terminal failures.
+    - Add drift tests or scripted checks for `AGENTS.md`, `Examples/agents/*`, and the reusable skill so examples keep using valid commands, `--json`, documented retry policy, and current result classes.
+  - Progress: reusable generic agent skill added under `Examples/agents/skills/xcsteward/`.
+  - Progress: profile discovery commands added: `projects --json` lists configured profiles and load status, `profile show <name> --json` returns a materialized profile document, and `profile init --detect --json` creates a detected profile from the current repo when it has an unambiguous project/workspace and scheme.
+  - Progress: profile creation is now a one-command agent path: `profile init --detect --json` defaults `--repo-root` to the current directory, returns `next_commands`, and documents how to handle multiple schemes or missing simulator assignment.
+  - Progress: `explain <job-id> --json` added as a bounded triage command returning summary, artifacts, parsed JUnit failures, build issue lines, log excerpts, warnings, retry policy, and recommended next action without invoking Xcode or mutating state.
+  - Progress: `submit` now accepts repeatable `--metadata key=value` plus `--label <value>` as a shortcut for `label` metadata, preserving ownership hints in `JobSummary.metadata` and terminal `artifacts/run-metadata.json`.
+  - Progress: plain human `submit --wait` now prints immediate job context and compact wait updates, while `status --watch` and `logs --follow` provide watch/follow workflows without changing one-shot JSON contracts.
+
 ### Public alpha release gates
 
 - [x] Prove the S0 safety contract before public alpha.
@@ -21,6 +44,7 @@
   - Progress: unsafe explicit DerivedData overrides are now a release-matrix doctor gate: repo-local and external shared paths warn with manual action instead of being silently accepted or auto-fixed.
   - Progress: Xcode-managed parallel worker counts above one are now a release-matrix doctor gate: the warning is non-auto-fixable and points users to serial or one-worker execution unless a live smoke job proves clone stability.
   - Progress: cleanup now resolves symlinks before considering a terminal job directory eligible, so a job path that is textually under `jobs/` but resolves outside the configured state root is skipped and cannot delete external files or remove the job record.
+  - Progress: `cleanup --caches` now has a dry-run-by-default path for deleting only XCSteward-owned state-root cache/evidence items, with job artifact deletion kept separate from cache cleanup.
   - Progress: stale worker recovery now has safety coverage proving a distinct live recorded PID that is not an executor-owned runner is not terminated, the running job and simulator lease are preserved, and only the stale worker lease is released.
   - Progress: foreign simulator leases now have focused coverage proving a new job fails before simulator mutation or build/test execution, preserves the existing lease, and leaves summary/log/run-metadata evidence.
   - Progress: malformed project profiles now fail as `runner_bootstrap_failure` before any `xcrun`/`xcodebuild` command, process record, simulator lease, or simulator mutation is created, while preserving summary/log/run-metadata evidence.

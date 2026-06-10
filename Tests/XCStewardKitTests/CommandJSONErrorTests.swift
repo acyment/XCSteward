@@ -60,6 +60,29 @@ final class CommandJSONErrorTests: XCTestCase {
         XCTAssertEqual(jobEntries ?? [], [])
     }
 
+    func testSubmitRejectsMalformedMetadataBeforeQueueMutation() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+
+        let result = try runCLI(arguments: [
+            "submit",
+            "--state-root", stateRoot.path,
+            "--project", "demo",
+            "--metadata", "agent",
+            "--json",
+        ])
+
+        XCTAssertEqual(result.status, 2)
+        XCTAssertEqual(result.stdout, "")
+        let error = try commandError(from: result.stderr)
+        XCTAssertEqual(error["code"] as? String, "usage")
+        XCTAssertEqual(error["message"] as? String, "submit --metadata must be key=value")
+        let jobEntries = try? FileManager.default.contentsOfDirectory(
+            atPath: stateRoot.appendingPathComponent("jobs").path
+        )
+        XCTAssertEqual(jobEntries ?? [], [])
+    }
+
     func testGlobalStateRootRejectsMissingOptionValueBeforeQueueMutation() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -107,6 +130,22 @@ final class CommandJSONErrorTests: XCTestCase {
             (
                 ["jobs", "--state-root", stateRoot.path, "extra", "--json"],
                 "jobs received unexpected arguments: extra"
+            ),
+            (
+                ["explain", "--state-root", stateRoot.path, "missing-job", "extra", "--json"],
+                "explain received unexpected arguments: extra"
+            ),
+            (
+                ["projects", "--state-root", stateRoot.path, "extra", "--json"],
+                "projects received unexpected arguments: extra"
+            ),
+            (
+                ["profile", "--state-root", stateRoot.path, "show", "missing", "extra", "--json"],
+                "profile show received unexpected arguments: extra"
+            ),
+            (
+                ["profile", "--state-root", stateRoot.path, "init", "--repo-root", stateRoot.path, "--bogus", "--json"],
+                "profile init received unexpected arguments: --bogus"
             ),
             (
                 ["artifacts", "--state-root", stateRoot.path, "missing-job", "extra", "--json"],

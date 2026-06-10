@@ -24,7 +24,7 @@ struct ResultClassPolicy: Sendable {
         case .buildTimeout:
             return "Build timed out"
         case .runnerBootstrapFailure:
-            return "Runner failed before tests executed"
+            return "Runner failed before XCTest attached"
         case .artifactFailure:
             return "Artifacts were missing or invalid"
         case .testTimeout:

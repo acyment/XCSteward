@@ -19,10 +19,15 @@ final class SimulatorBootstrapE2ETests: XCTestCase {
         let json = try result.jsonObject()
         XCTAssertEqual(json["result_class"] as? String, "runner_bootstrap_failure")
         XCTAssertEqual(json["state"] as? String, "failed")
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("before XCTest attached") == true)
+        XCTAssertTrue((json["summary_line"] as? String)?.contains("environment failure") == true)
         let jobID = try e2e.jobID(from: json)
 
         let statusJSON = try e2e.status(jobID)
         XCTAssertEqual(statusJSON["state"] as? String, "failed")
+        XCTAssertEqual(statusJSON["result_class"] as? String, "runner_bootstrap_failure")
+        XCTAssertTrue((statusJSON["summary_line"] as? String)?.contains("before XCTest attached") == true)
+        XCTAssertTrue((statusJSON["summary_line"] as? String)?.contains("Waiting on Data Migration") == true)
     }
 
     func testExecutorRecoversWhenAlreadyBootedSimulatorFailsBootstatus() throws {

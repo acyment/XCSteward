@@ -14,6 +14,8 @@ struct CLIProgressEvent: Encodable {
     var summaryLine: String?
     var processID: Int32?
     var simulatorID: String?
+    var phase: String?
+    var phaseElapsedSeconds: Double?
     var checkID: String?
     var status: String?
     var schemaVersion: Int = xcstewardSchemaVersion
@@ -29,10 +31,17 @@ struct CLIProgressEvent: Encodable {
         case summaryLine = "summary_line"
         case processID = "process_id"
         case simulatorID = "simulator_id"
+        case phase
+        case phaseElapsedSeconds = "phase_elapsed_seconds"
         case checkID = "check_id"
         case status
         case schemaVersion = "schema_version"
     }
+}
+
+private struct CLICommandProgress {
+    var phase: String?
+    var phaseElapsedSeconds: Double?
 }
 
 final class CLIProgressReporter {
@@ -62,6 +71,7 @@ final class CLIProgressReporter {
         }
         let now = clock.now()
         let summary = job.flatMap { try? loadPersistedSummary(for: $0) } ?? job?.summary
+        let commandProgress = job.map { loadCommandProgress(for: $0, now: now) } ?? CLICommandProgress(phase: nil, phaseElapsedSeconds: nil)
         let progressEvent = CLIProgressEvent(
             event: event,
             timestamp: now.timeIntervalSince1970,
@@ -73,6 +83,8 @@ final class CLIProgressReporter {
             summaryLine: summary?.summaryLine ?? job?.summary?.summaryLine,
             processID: job?.processID,
             simulatorID: job?.simulatorID,
+            phase: commandProgress.phase,
+            phaseElapsedSeconds: commandProgress.phaseElapsedSeconds,
             checkID: checkID,
             status: status
         )
@@ -89,5 +101,45 @@ final class CLIProgressReporter {
             return nil
         }
         return try decodeJSON(JobSummary.self, from: Data(contentsOf: summaryURL))
+    }
+
+    private func loadCommandProgress(for job: JobRecord, now: Date) -> CLICommandProgress {
+        let commandEventLog = URL(fileURLWithPath: job.jobDirectory)
+            .appendingPathComponent("artifacts/command-events.jsonl")
+        guard FileManager.default.fileExists(atPath: commandEventLog.path),
+              let data = try? Data(contentsOf: commandEventLog),
+              let text = String(data: data, encoding: .utf8) else {
+            return CLICommandProgress(phase: nil, phaseElapsedSeconds: nil)
+        }
+
+        let decoder = JSONDecoder()
+        var activeEvents: [String: RunCommandEvent] = [:]
+        var lastEvent: RunCommandEvent?
+        for line in text.split(separator: "\n") {
+            guard let event = try? decoder.decode(RunCommandEvent.self, from: Data(line.utf8)) else {
+                continue
+            }
+            lastEvent = event
+            let key = "\(event.phase ?? "")|\(event.tool)|\(event.commandLine)"
+            switch event.event {
+            case "launching", "started":
+                activeEvents[key] = event
+            case "finished", "failed":
+                activeEvents.removeValue(forKey: key)
+            default:
+                break
+            }
+        }
+
+        if let active = activeEvents.values.sorted(by: { $0.timestamp < $1.timestamp }).last {
+            return CLICommandProgress(
+                phase: active.phase ?? active.tool,
+                phaseElapsedSeconds: max(0, now.timeIntervalSince1970 - active.timestamp)
+            )
+        }
+        return CLICommandProgress(
+            phase: lastEvent?.phase ?? lastEvent?.tool,
+            phaseElapsedSeconds: nil
+        )
     }
 }

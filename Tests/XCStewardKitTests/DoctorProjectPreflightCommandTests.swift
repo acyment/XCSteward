@@ -141,6 +141,7 @@ final class DoctorProjectPreflightCommandTests: XCTestCase {
         XCTAssertEqual(xctestrun["fixed"] as? Bool, false)
         XCTAssertTrue((xctestrun["message"] as? String)?.contains("timed out") == true)
         XCTAssertTrue((xctestrun["message"] as? String)?.contains("1s") == true)
+        XCTAssertTrue((xctestrun["message"] as? String)?.contains("no compiler error was observed before timeout") == true)
         let manualAction = xctestrun["manual_action"] as? String
         XCTAssertTrue(manualAction?.contains("full preflight assurance") == true)
         XCTAssertTrue(manualAction?.contains("submit") == true)

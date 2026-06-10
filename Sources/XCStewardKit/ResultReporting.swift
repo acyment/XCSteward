@@ -156,6 +156,7 @@ private struct RunMetadata: Codable, Sendable {
     var testProductsPath: String?
     var resultStreamPath: String?
     var xcodebuildHelpPath: String?
+    var diagnosticExcerpt: JobDiagnosticExcerpt?
     var commands: [RunCommandRecord]
     var attempts: [AttemptArtifact]
     var probeWarnings: [ProbeWarning]
@@ -190,6 +191,7 @@ private struct RunMetadata: Codable, Sendable {
         case testProductsPath = "test_products_path"
         case resultStreamPath = "result_stream_path"
         case xcodebuildHelpPath = "xcodebuild_help_path"
+        case diagnosticExcerpt = "diagnostic_excerpt"
         case commands
         case attempts
         case probeWarnings = "probe_warnings"
@@ -202,6 +204,7 @@ private struct RunRequestMetadata: Codable, Sendable {
     var skipTesting: [String]
     var onlyTestConfigurations: [String]
     var skipTestConfigurations: [String]
+    var envOverrideKeys: [String]
     var metadata: [String: String]
 
     enum CodingKeys: String, CodingKey {
@@ -210,6 +213,7 @@ private struct RunRequestMetadata: Codable, Sendable {
         case skipTesting = "skip_testing"
         case onlyTestConfigurations = "only_test_configurations"
         case skipTestConfigurations = "skip_test_configurations"
+        case envOverrideKeys = "env_override_keys"
         case metadata
     }
 }
@@ -405,6 +409,7 @@ final class ResultReporter: @unchecked Sendable {
                 skipTesting: request.skipTesting,
                 onlyTestConfigurations: request.onlyTestConfigurations,
                 skipTestConfigurations: request.skipTestConfigurations,
+                envOverrideKeys: request.envOverrides.keys.sorted(),
                 metadata: request.metadata
             ),
             profile: RunProfileMetadata(
@@ -440,6 +445,7 @@ final class ResultReporter: @unchecked Sendable {
             testProductsPath: environment.fileSystem.fileExists(paths.testProducts) ? paths.testProducts.path : nil,
             resultStreamPath: environment.fileSystem.fileExists(paths.resultStream) ? paths.resultStream.path : nil,
             xcodebuildHelpPath: xcodebuildHelpPath,
+            diagnosticExcerpt: summary.diagnosticExcerpt,
             commands: commands,
             attempts: attemptArtifacts(at: paths.attemptsRoot),
             probeWarnings: warnings

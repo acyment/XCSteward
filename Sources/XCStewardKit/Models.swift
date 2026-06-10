@@ -271,6 +271,7 @@ public struct JobRequest: Codable, Sendable {
     public var onlyTestConfigurations: [String]
     public var skipTestConfigurations: [String]
     public var simulatorID: String?
+    public var envOverrides: [String: String]
     public var metadata: [String: String]
     public var wait: Bool
 
@@ -282,6 +283,7 @@ public struct JobRequest: Codable, Sendable {
         onlyTestConfigurations: [String] = [],
         skipTestConfigurations: [String] = [],
         simulatorID: String?,
+        envOverrides: [String: String] = [:],
         metadata: [String: String],
         wait: Bool
     ) {
@@ -292,6 +294,7 @@ public struct JobRequest: Codable, Sendable {
         self.onlyTestConfigurations = onlyTestConfigurations
         self.skipTestConfigurations = skipTestConfigurations
         self.simulatorID = simulatorID
+        self.envOverrides = envOverrides
         self.metadata = metadata
         self.wait = wait
     }
@@ -304,6 +307,7 @@ public struct JobRequest: Codable, Sendable {
         case onlyTestConfigurations
         case skipTestConfigurations
         case simulatorID
+        case envOverrides = "env_overrides"
         case metadata
         case wait
     }
@@ -317,6 +321,7 @@ public struct JobRequest: Codable, Sendable {
         self.onlyTestConfigurations = try container.decodeIfPresent([String].self, forKey: .onlyTestConfigurations) ?? []
         self.skipTestConfigurations = try container.decodeIfPresent([String].self, forKey: .skipTestConfigurations) ?? []
         self.simulatorID = try container.decodeIfPresent(String.self, forKey: .simulatorID)
+        self.envOverrides = try container.decodeIfPresent([String: String].self, forKey: .envOverrides) ?? [:]
         self.metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
         self.wait = try container.decodeIfPresent(Bool.self, forKey: .wait) ?? false
     }
@@ -370,6 +375,40 @@ public struct JobCounts: Codable, Sendable {
     public var testsSkipped: Int
 }
 
+public struct JobDiagnosticExcerpt: Codable, Sendable {
+    public var subtype: String?
+    public var phase: String?
+    public var phaseElapsedSeconds: Double?
+    public var timeoutSeconds: Double?
+    public var evidencePaths: [String]
+    public var excerpt: String
+
+    public init(
+        subtype: String? = nil,
+        phase: String? = nil,
+        phaseElapsedSeconds: Double? = nil,
+        timeoutSeconds: Double? = nil,
+        evidencePaths: [String] = [],
+        excerpt: String
+    ) {
+        self.subtype = subtype
+        self.phase = phase
+        self.phaseElapsedSeconds = phaseElapsedSeconds
+        self.timeoutSeconds = timeoutSeconds
+        self.evidencePaths = evidencePaths
+        self.excerpt = excerpt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case subtype
+        case phase
+        case phaseElapsedSeconds = "phase_elapsed_seconds"
+        case timeoutSeconds = "timeout_seconds"
+        case evidencePaths = "evidence_paths"
+        case excerpt
+    }
+}
+
 struct TestTimingSample: Sendable {
     var identifier: String
     var durationSeconds: Double
@@ -392,6 +431,7 @@ public struct JobSummary: Codable, Sendable {
     public var artifacts: JobArtifacts
     public var summaryLine: String
     public var metadata: [String: String]
+    public var diagnosticExcerpt: JobDiagnosticExcerpt? = nil
     public var schemaVersion: Int = xcstewardSchemaVersion
 
     enum CodingKeys: String, CodingKey {
@@ -411,6 +451,7 @@ public struct JobSummary: Codable, Sendable {
         case artifacts
         case summaryLine = "summary_line"
         case metadata
+        case diagnosticExcerpt = "diagnostic_excerpt"
         case schemaVersion = "schema_version"
     }
 }
@@ -437,6 +478,7 @@ extension JobSummary {
         self.artifacts = try c.decode(JobArtifacts.self, forKey: .artifacts)
         self.summaryLine = try c.decode(String.self, forKey: .summaryLine)
         self.metadata = try c.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
+        self.diagnosticExcerpt = try c.decodeIfPresent(JobDiagnosticExcerpt.self, forKey: .diagnosticExcerpt)
         self.schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? xcstewardSchemaVersion
     }
 }

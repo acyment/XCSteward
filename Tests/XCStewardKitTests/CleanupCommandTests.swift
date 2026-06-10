@@ -134,6 +134,87 @@ final class CleanupCommandTests: XCTestCase {
         XCTAssertLessThan(allocatedBytes, 32 * 1024 * 1024)
     }
 
+    func testCleanupCachesDryRunReportsCachesWithoutSelectingJobs() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        try seedCleanupJob(store: store, stateRoot: stateRoot, id: "old-job", createdAt: 1, finishedAt: 2)
+        try seedCleanupCaches(stateRoot: stateRoot)
+
+        let result = try runCLI(arguments: [
+            "cleanup",
+            "--state-root", stateRoot.path,
+            "--caches",
+            "--json",
+        ])
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let report = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
+        XCTAssertEqual(report["dry_run"] as? Bool, true)
+        XCTAssertEqual(report["candidate_count"] as? Int, 0)
+        XCTAssertEqual(report["deleted_count"] as? Int, 0)
+        XCTAssertEqual(report["cache_candidate_count"] as? Int, 3)
+        XCTAssertEqual(report["cache_deleted_count"] as? Int, 0)
+        XCTAssertGreaterThan(report["cache_selected_bytes"] as? Int ?? 0, 0)
+        let cacheCandidates = try XCTUnwrap(report["cache_candidates"] as? [[String: Any]])
+        let candidatePaths = Set(cacheCandidates.compactMap { $0["path"] as? String })
+        XCTAssertTrue(candidatePaths.contains(stateRoot.appendingPathComponent("host-health.json").path))
+        XCTAssertTrue(candidatePaths.contains(stateRoot.appendingPathComponent("doctor/last-report.json").path))
+        XCTAssertTrue(candidatePaths.contains(stateRoot.appendingPathComponent("doctor/xctestrun-integrity").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("jobs/old-job").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("doctor/last-report.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("host-health.json").path))
+    }
+
+    func testCleanupCachesApplyDeletesCachesOnly() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+        let store = try StateStore(environment: AppEnvironment(paths: AppPaths(stateRoot: stateRoot)))
+        try seedCleanupJob(store: store, stateRoot: stateRoot, id: "old-job", createdAt: 1, finishedAt: 2)
+        try seedCleanupCaches(stateRoot: stateRoot)
+
+        let result = try runCLI(arguments: [
+            "cleanup",
+            "--state-root", stateRoot.path,
+            "--caches",
+            "--apply",
+            "--json",
+        ])
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        let report = try XCTUnwrap(parseJSON(result.stdout) as? [String: Any])
+        XCTAssertEqual(report["dry_run"] as? Bool, false)
+        XCTAssertEqual(report["candidate_count"] as? Int, 0)
+        XCTAssertEqual(report["deleted_count"] as? Int, 0)
+        XCTAssertEqual(report["cache_candidate_count"] as? Int, 3)
+        XCTAssertEqual(report["cache_deleted_count"] as? Int, 3)
+        XCTAssertNotNil(try store.fetchJob(id: "old-job"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("jobs/old-job").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("doctor/last-report.json").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("doctor/xctestrun-integrity").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateRoot.appendingPathComponent("host-health.json").path))
+    }
+
+    func testCleanupCachesRejectsJobCleanupFilters() throws {
+        let temp = try makeTempDirectory()
+        let stateRoot = temp.appendingPathComponent("state")
+
+        let result = try runCLI(arguments: [
+            "cleanup",
+            "--state-root", stateRoot.path,
+            "--caches",
+            "--older-than", "1d",
+            "--json",
+        ])
+
+        XCTAssertEqual(result.status, 2)
+        XCTAssertEqual(result.stdout, "")
+        let envelope = try XCTUnwrap(parseJSON(result.stderr) as? [String: Any])
+        let error = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "usage")
+        XCTAssertEqual(error["message"] as? String, "cleanup --caches cannot combine with job cleanup filters")
+    }
+
     func testCleanupServiceIgnoresTerminalJobOutsideJobsRoot() throws {
         let temp = try makeTempDirectory()
         let stateRoot = temp.appendingPathComponent("state")
@@ -233,6 +314,15 @@ private func seedCleanupJob(
         request: request
     ))
     return jobDirectory
+}
+
+private func seedCleanupCaches(stateRoot: URL) throws {
+    try writeText("{}", to: stateRoot.appendingPathComponent("host-health.json"))
+    try writeText("{}", to: stateRoot.appendingPathComponent("doctor/last-report.json"))
+    try writeText(
+        "doctor evidence",
+        to: stateRoot.appendingPathComponent("doctor/xctestrun-integrity/demo/evidence.json")
+    )
 }
 
 private func allocatedRegularFileBytes(in directory: URL) throws -> Int {

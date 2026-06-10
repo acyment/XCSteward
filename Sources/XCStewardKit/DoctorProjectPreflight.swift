@@ -610,11 +610,14 @@ final class DoctorProjectPreflight {
                 timedOut: true,
                 output: build.output
             )
+            let compilerNote = buildOutputShowsCompilerError(build.output)
+                ? ""
+                : "; no compiler error was observed before timeout"
             return xctestrunIntegrityCheckAfterCleanup(
                 makeCheck(
                     id: "project.xctestrun_integrity",
                     status: .warn,
-                    message: "build-for-testing timed out after \(formattedSeconds(buildProbeTimeout)) while validating .xctestrun generation",
+                    message: "build-for-testing timed out after \(formattedSeconds(buildProbeTimeout)) while validating .xctestrun generation\(compilerNote)",
                     manualAction: "Inspect the retained build-for-testing evidence when you need full preflight assurance; XCSteward submit will still run with the normal build timeout and preserve job artifacts",
                     evidencePath: evidence?.path,
                     failureExcerpt: evidence?.excerpt
@@ -948,6 +951,13 @@ final class DoctorProjectPreflight {
         }
         return interesting.truncatedForDoctorMessage(limit: limit)
     }
+
+    private func buildOutputShowsCompilerError(_ output: String) -> Bool {
+        let markers = ["error:", "fatal error:", "BUILD FAILED", "The following build commands failed"]
+        return markers.contains { marker in
+            output.localizedCaseInsensitiveContains(marker)
+        }
+    }
 }
 
 private extension String {
@@ -971,7 +981,9 @@ extension DoctorProjectPreflight: SimulatorLifecycleTooling {
         try environment.toolRunner.run(
             tool: tool,
             arguments: arguments,
-            environment: context.profile.env.merging(environmentOverrides) { _, override in override },
+            environment: context.profile.env
+                .merging(context.envOverrides) { _, override in override }
+                .merging(environmentOverrides) { _, override in override },
             workingDirectory: context.profile.workingDirectory,
             timeout: timeout
         )

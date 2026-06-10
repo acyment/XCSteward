@@ -22,8 +22,19 @@ while :; do
 done
 
 printf '%s\n' "$status"
+xcsteward --state-root "$state_root" explain "$job_id" --json
 xcsteward --state-root "$state_root" artifacts "$job_id" --json
 ```
+
+If Codex needs streaming status instead of a polling loop, use
+`xcsteward --state-root "$state_root" status "$job_id" --watch --json` and
+consume the newline-delimited `JobSummary` objects. Use
+`logs "$job_id" --follow` only for human-facing terminal inspection.
+
+If a wait seems hung or quiet, check the same state root with `status --json`,
+`jobs --json`, or `status --watch` before killing the job. A missing
+`combined.log` usually means the job is still queued or in simulator/bootstrap
+setup before xcodebuild has written logs.
 
 Classification guide:
 

@@ -81,6 +81,6 @@ final class JUnitReportWriterTests: XCTestCase {
         XCTAssertEqual(cases.count, 1)
         XCTAssertEqual(cases[0].className, "XCSteward.shard-000")
         XCTAssertEqual(cases[0].name, "runner_bootstrap_failure")
-        XCTAssertEqual(cases[0].errorMessage, "Runner failed before tests executed")
+        XCTAssertEqual(cases[0].errorMessage, "Runner failed before XCTest attached")
     }
 }

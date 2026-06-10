@@ -13,6 +13,109 @@ private struct CLICommandDefinition {
     var handler: CLICommandHandler
 }
 
+private struct ProjectListDocument: Encodable {
+    var stateRoot: String
+    var projectsRoot: String
+    var projects: [ProjectReferenceDocument]
+    var schemaVersion: Int = xcstewardSchemaVersion
+}
+
+private struct ProjectReferenceDocument: Encodable {
+    var name: String
+    var path: String
+    var loadStatus: String
+    var errorCode: String?
+    var errorMessage: String?
+    var repoRoot: String?
+    var projectPath: String?
+    var workspacePath: String?
+    var scheme: String?
+}
+
+private struct ProfileShowDocument: Encodable {
+    var path: String
+    var profile: ProjectProfile
+    var schemaVersion: Int = xcstewardSchemaVersion
+}
+
+private struct ProfileInitDocument: Encodable {
+    var profilePath: String
+    var created: Bool
+    var warnings: [String]
+    var nextCommands: [String]
+    var profile: ProjectProfile
+    var schemaVersion: Int = xcstewardSchemaVersion
+}
+
+private struct DetectedProfileTarget {
+    var containerKey: String
+    var containerPath: String
+    var scheme: String
+    var availableSchemes: [String]
+}
+
+private struct ManagedSimulatorInitOptions {
+    var name: String
+    var deviceType: String
+    var runtime: String
+}
+
+private struct ExplainDocument: Encodable {
+    var jobID: String
+    var project: String
+    var state: JobState
+    var resultClass: ResultClass?
+    var exitCode: Int32?
+    var summaryLine: String
+    var retryPolicy: ExplainRetryPolicy
+    var recommendedAction: String
+    var artifacts: JobArtifacts
+    var failedTests: [ExplainFailedTest]
+    var buildIssues: [ExplainIssue]
+    var logExcerpts: [ExplainLogExcerpt]
+    var warnings: [String]
+    var summary: JobSummary
+    var schemaVersion: Int = xcstewardSchemaVersion
+}
+
+private struct ExplainRetryPolicy: Encodable {
+    var autoRetry: Bool
+    var maxAutoRetries: Int
+    var reason: String
+}
+
+private struct ExplainFailedTest: Encodable {
+    var className: String
+    var name: String
+    var failureKind: String
+    var message: String?
+}
+
+private struct ExplainIssue: Encodable {
+    var source: String
+    var path: String
+    var lineNumber: Int
+    var text: String
+}
+
+private struct ExplainLogExcerpt: Encodable {
+    var source: String
+    var path: String
+    var lineCount: Int
+    var excerpt: String
+}
+
+private struct HumanProgressUpdate {
+    var line: String
+    var signature: String
+}
+
+private struct HumanCommandProgress {
+    var activePhase: String?
+    var lastEventTimestamp: Double?
+    var lastEventName: String?
+}
+
 public struct XCStewardApp {
     private var environment: AppEnvironment
 
@@ -89,6 +192,18 @@ public struct XCStewardApp {
                 handler: { app, arguments, store in try app.handleSubmit(arguments: arguments, store: store) }
             ),
             CLICommandDefinition(
+                name: "projects",
+                rootHelpLine: "  projects   List configured project profiles.",
+                help: projectsHelp,
+                handler: { app, arguments, store in try app.handleProjects(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "profile",
+                rootHelpLine: "  profile    Show or initialize project profiles.",
+                help: profileHelp,
+                handler: { app, arguments, store in try app.handleProfile(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
                 name: "status",
                 rootHelpLine: "  status     Show a job summary.",
                 help: statusHelp,
@@ -99,6 +214,12 @@ public struct XCStewardApp {
                 rootHelpLine: "  jobs       List known jobs.",
                 help: jobsHelp,
                 handler: { app, arguments, store in try app.handleJobs(arguments: arguments, store: store) }
+            ),
+            CLICommandDefinition(
+                name: "explain",
+                rootHelpLine: "  explain    Explain a job outcome and useful evidence.",
+                help: explainHelp,
+                handler: { app, arguments, store in try app.handleExplain(arguments: arguments, store: store) }
             ),
             CLICommandDefinition(
                 name: "logs",
@@ -178,24 +299,61 @@ public struct XCStewardApp {
           --progress                  Emit live JSON progress events to stderr.
           --test-plan <name>          Override the profile's default test plan.
           --simulator-id <id>         Override the profile's simulator selection.
+          --env <KEY=VALUE>           Override or add an environment variable for this job. Repeatable.
           --only-testing <identifier> Restrict execution to a test target or test case. Repeatable.
           --skip-testing <identifier> Exclude a test target or test case. Repeatable.
           --only-test-configuration <name>
                                       Restrict execution to a test plan configuration. Repeatable.
           --skip-test-configuration <name>
                                       Exclude a test plan configuration. Repeatable.
+          --metadata <key=value>     Attach metadata to the job summary. Repeatable.
+          --label <value>            Shortcut for --metadata label=<value>.
           --help, -h                  Show this command help.
+        """
+    }
+
+    private static func projectsHelp(executableName: String) -> String {
+        """
+        Usage:
+          \(executableName) [--state-root <path>] projects [--json]
+
+        Options:
+          --json      Print configured project profiles as JSON.
+          --help, -h  Show this command help.
+        """
+    }
+
+    private static func profileHelp(executableName: String) -> String {
+        """
+        Usage:
+          \(executableName) [--state-root <path>] profile show <name> [--json]
+          \(executableName) [--state-root <path>] profile init --detect [options]
+
+        Options:
+          --name <name>                    Profile name for init. Defaults to repo directory name.
+          --repo-root <path>               Repository root for init. Defaults to the current directory.
+          --detect                         Detect the project/workspace and scheme.
+          --scheme <name>                  Scheme to write when detection finds multiple schemes.
+          --simulator-id <id>              Default simulator UDID to write.
+          --managed-simulator-name <name>  Managed simulator name to write.
+          --device-type <name-or-id>       Managed simulator device type to write.
+          --runtime <name-or-id>           Managed simulator runtime to write.
+          --force                          Overwrite an existing profile during init.
+          --json                           Print the profile document as JSON.
+          --help, -h                       Show this command help.
         """
     }
 
     private static func statusHelp(executableName: String) -> String {
         """
         Usage:
-          \(executableName) [--state-root <path>] status <job-id> [--json]
+          \(executableName) [--state-root <path>] status <job-id> [--watch] [--interval <seconds>] [--json]
 
         Options:
-          --json      Print the job summary as JSON.
-          --help, -h  Show this command help.
+          --watch                 Poll until the job reaches a terminal state.
+          --interval <seconds>    Watch polling interval. Default: 2.
+          --json                  Print the job summary as JSON. With --watch, prints NDJSON summaries.
+          --help, -h              Show this command help.
         """
     }
 
@@ -210,12 +368,24 @@ public struct XCStewardApp {
         """
     }
 
+    private static func explainHelp(executableName: String) -> String {
+        """
+        Usage:
+          \(executableName) [--state-root <path>] explain <job-id> [--json]
+
+        Options:
+          --json      Print a bounded triage document as JSON.
+          --help, -h  Show this command help.
+        """
+    }
+
     private static func logsHelp(executableName: String) -> String {
         """
         Usage:
-          \(executableName) [--state-root <path>] logs <job-id>
+          \(executableName) [--state-root <path>] logs <job-id> [--follow]
 
         Options:
+          --follow    Stream appended combined log output until the job is terminal.
           --help, -h  Show this command help.
         """
     }
@@ -250,6 +420,7 @@ public struct XCStewardApp {
         Options:
           --apply                 Delete selected terminal jobs. Defaults to dry-run.
           --dry-run               Report selected terminal jobs without deleting.
+          --caches                Select XCSteward-owned cache/evidence files instead of jobs.
           --older-than <duration> Select terminal jobs older than this age. Default: 7d.
                                   Supports s, m, h, and d suffixes.
           --keep-last <count>     Always keep this many newest terminal jobs. Default: 20.
@@ -287,6 +458,132 @@ public struct XCStewardApp {
         """
     }
 
+    private func handleProjects(arguments: [String], store: StateStore) throws -> Int32 {
+        _ = store
+        var arguments = arguments
+        let json = removeFlag("--json", from: &arguments)
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("projects received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        let document = try projectListDocument()
+        if json {
+            try writeSnakeCaseJSON(document)
+        } else {
+            for project in document.projects {
+                print("\(project.name) \(project.loadStatus)")
+            }
+        }
+        return 0
+    }
+
+    private func handleProfile(arguments: [String], store: StateStore) throws -> Int32 {
+        _ = store
+        var arguments = arguments
+        guard let subcommand = arguments.first else {
+            throw XCStewardError.usage("profile requires a subcommand: show or init")
+        }
+        arguments.removeFirst()
+        switch subcommand {
+        case "show":
+            return try handleProfileShow(arguments: arguments)
+        case "init":
+            return try handleProfileInit(arguments: arguments)
+        default:
+            throw XCStewardError.usage("Unknown profile subcommand: \(subcommand)")
+        }
+    }
+
+    private func handleProfileShow(arguments: [String]) throws -> Int32 {
+        var arguments = arguments
+        let json = removeFlag("--json", from: &arguments)
+        guard let name = arguments.first else {
+            throw XCStewardError.usage("profile show requires a profile name")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("profile show received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        let profile = try ProfileLoader(environment: environment).loadProfile(named: name)
+        let document = ProfileShowDocument(
+            path: profilePath(for: profile.name).path,
+            profile: profile
+        )
+        if json {
+            try writeSnakeCaseJSON(document)
+        } else {
+            print("\(profile.name) \(profile.scheme) \(profile.repoRoot)")
+        }
+        return 0
+    }
+
+    private func handleProfileInit(arguments: [String]) throws -> Int32 {
+        var arguments = arguments
+        let json = removeFlag("--json", from: &arguments)
+        let detect = removeFlag("--detect", from: &arguments)
+        let force = removeFlag("--force", from: &arguments)
+        let explicitName = try consumeOption("--name", from: &arguments)
+        let repoRootValue = try consumeOption("--repo-root", from: &arguments)
+        let explicitScheme = try consumeOption("--scheme", from: &arguments)
+        let simulatorID = try consumeOption("--simulator-id", from: &arguments)
+        let managedName = try consumeOption("--managed-simulator-name", from: &arguments)
+        let deviceType = try consumeOption("--device-type", from: &arguments)
+        let runtime = try consumeOption("--runtime", from: &arguments)
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("profile init received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        guard detect else {
+            throw XCStewardError.usage("profile init currently requires --detect")
+        }
+        guard simulatorID == nil || (managedName == nil && deviceType == nil && runtime == nil) else {
+            throw XCStewardError.usage("profile init cannot combine --simulator-id with managed simulator options")
+        }
+
+        let repoRoot = absoluteURL(path: repoRootValue ?? ".")
+        guard environment.fileSystem.fileExists(repoRoot) else {
+            throw XCStewardError.invalidConfiguration("profile init repo root does not exist: \(repoRoot.path)")
+        }
+        let name = try profileName(explicitName: explicitName, repoRoot: repoRoot)
+        let profileURL = profilePath(for: name)
+        if environment.fileSystem.fileExists(profileURL), !force {
+            throw XCStewardError.invalidConfiguration("Profile '\(name)' already exists at \(profileURL.path); pass --force to overwrite")
+        }
+
+        let detected = try detectProfile(repoRoot: repoRoot, explicitScheme: explicitScheme)
+        let managedSimulator = try managedSimulatorOptions(
+            profileName: name,
+            managedName: managedName,
+            deviceType: deviceType,
+            runtime: runtime
+        )
+        let warnings = profileInitWarnings(simulatorID: simulatorID, managedSimulator: managedSimulator)
+        try environment.fileSystem.writeData(
+            Data(profileTOML(
+                repoRoot: repoRoot,
+                detected: detected,
+                simulatorID: simulatorID,
+                managedSimulator: managedSimulator
+            ).utf8),
+            to: profileURL
+        )
+        let profile = try ProfileLoader(environment: environment).loadProfile(named: name)
+        let document = ProfileInitDocument(
+            profilePath: profileURL.path,
+            created: true,
+            warnings: warnings,
+            nextCommands: profileInitNextCommands(profileName: name, hasSimulatorAssignment: simulatorID != nil || managedSimulator != nil),
+            profile: profile
+        )
+        if json {
+            try writeSnakeCaseJSON(document)
+        } else {
+            print("Created \(name) at \(profileURL.path)")
+            for warning in warnings {
+                print("warning: \(warning)")
+            }
+        }
+        return 0
+    }
+
     private func handleSubmit(arguments: [String], store: StateStore) throws -> Int32 {
         let options = try SubmitCommandOptions.parse(arguments: arguments)
         let request = options.request
@@ -300,6 +597,9 @@ public struct XCStewardApp {
         let record = JobRecord(id: jobID, project: request.project, state: .queued, resultClass: nil, request: request, summary: nil, jobDirectory: jobDirectory.path, createdAt: now, startedAt: nil, finishedAt: nil, processID: nil, simulatorID: nil, cancelRequested: false)
         try store.createJob(record)
         progress.emit("job_queued", job: record)
+        if !options.json {
+            printSubmitContext(for: record)
+        }
 
         if request.wait {
             do {
@@ -313,6 +613,7 @@ public struct XCStewardApp {
                 store: store,
                 timeout: options.waitTimeout,
                 progress: progress,
+                humanProgress: !options.json,
                 workerExecutableURL: workerExecutableURL
             )
             try printJob(terminal, json: options.json)
@@ -333,6 +634,12 @@ public struct XCStewardApp {
     private func handleStatus(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
         let json = removeFlag("--json", from: &arguments)
+        let watch = removeFlag("--watch", from: &arguments)
+        let intervalValue = try consumeOption("--interval", from: &arguments)
+        if !watch, intervalValue != nil {
+            throw XCStewardError.usage("status --interval requires --watch")
+        }
+        let interval = try intervalValue.map(parseWatchInterval(_:)) ?? 2
         guard let jobID = arguments.first else {
             throw XCStewardError.usage("status requires a job id")
         }
@@ -342,6 +649,9 @@ public struct XCStewardApp {
         }
         guard let job = try store.fetchJob(id: jobID) else {
             throw XCStewardError.notFound("Job \(jobID) not found")
+        }
+        if watch {
+            return try watchStatus(id: jobID, initialJob: job, store: store, interval: interval, json: json)
         }
         try printJob(job, json: json)
         return exitCode(for: job.resultClass, state: job.state)
@@ -368,8 +678,38 @@ public struct XCStewardApp {
         return 0
     }
 
+    private func handleExplain(arguments: [String], store: StateStore) throws -> Int32 {
+        var arguments = arguments
+        let json = removeFlag("--json", from: &arguments)
+        guard let jobID = arguments.first else {
+            throw XCStewardError.usage("explain requires a job id")
+        }
+        arguments.removeFirst()
+        guard arguments.isEmpty else {
+            throw XCStewardError.usage("explain received unexpected arguments: \(arguments.joined(separator: " "))")
+        }
+        guard let job = try store.fetchJob(id: jobID) else {
+            throw XCStewardError.notFound("Job \(jobID) not found")
+        }
+        let summary = try loadSummary(for: job)
+        let document = explainDocument(for: summary)
+        if json {
+            try writeSnakeCaseJSON(document)
+        } else {
+            print("\(summary.jobID) \(summary.state.rawValue) \(summary.resultClass?.rawValue ?? "pending"): \(document.recommendedAction)")
+            for failedTest in document.failedTests {
+                print("failed test: \(failedTest.className).\(failedTest.name)")
+            }
+            for issue in document.buildIssues {
+                print("\(issue.source):\(issue.lineNumber): \(issue.text)")
+            }
+        }
+        return 0
+    }
+
     private func handleLogs(arguments: [String], store: StateStore) throws -> Int32 {
         var arguments = arguments
+        let follow = removeFlag("--follow", from: &arguments)
         guard let jobID = arguments.first else {
             throw XCStewardError.usage("logs requires a job id")
         }
@@ -381,9 +721,20 @@ public struct XCStewardApp {
             throw XCStewardError.notFound("logs requires a valid job id")
         }
         let summary = try loadSummary(for: job)
+        if follow {
+            try followLog(for: job, store: store, path: summary.artifacts.combinedLog)
+            return 0
+        }
         if let log = summary.artifacts.combinedLog {
-            let data = try environment.fileSystem.readData(from: URL(fileURLWithPath: log))
+            let url = URL(fileURLWithPath: log)
+            guard environment.fileSystem.fileExists(url) else {
+                print(missingCombinedLogMessage(for: job, path: log))
+                return 0
+            }
+            let data = try environment.fileSystem.readData(from: url)
             FileHandle.standardOutput.write(data)
+        } else {
+            print(missingCombinedLogMessage(for: job, path: nil))
         }
         return 0
     }
@@ -455,28 +806,49 @@ public struct XCStewardApp {
         let json = removeFlag("--json", from: &arguments)
         let apply = removeFlag("--apply", from: &arguments)
         let dryRunFlag = removeFlag("--dry-run", from: &arguments)
+        let caches = removeFlag("--caches", from: &arguments)
         if apply && dryRunFlag {
             throw XCStewardError.usage("cleanup cannot combine --apply and --dry-run")
         }
-        let olderThan = try consumeOption("--older-than", from: &arguments)
+        let olderThanValue = try consumeOption("--older-than", from: &arguments)
+        let keepLastValue = try consumeOption("--keep-last", from: &arguments)
+        let maxTotalBytesValue = try consumeOption("--max-total-size", from: &arguments)
+        if caches && (olderThanValue != nil || keepLastValue != nil || maxTotalBytesValue != nil) {
+            throw XCStewardError.usage("cleanup --caches cannot combine with job cleanup filters")
+        }
+        let olderThan = try olderThanValue
             .map(parseCleanupDuration(_:)) ?? (7 * 24 * 60 * 60)
-        let keepLast = try consumeOption("--keep-last", from: &arguments)
+        let keepLast = try keepLastValue
             .map { try parseNonNegativeInteger($0, option: "--keep-last") } ?? 20
-        let maxTotalBytes = try consumeOption("--max-total-size", from: &arguments)
+        let maxTotalBytes = try maxTotalBytesValue
             .map(parseCleanupSize(_:))
         guard arguments.isEmpty else {
             throw XCStewardError.usage("cleanup received unexpected arguments: \(arguments.joined(separator: " "))")
         }
 
-        let report = try CleanupService(environment: environment).cleanupTerminalJobs(
-            store: store,
-            olderThanSeconds: olderThan,
-            keepLast: keepLast,
-            maxTotalBytes: maxTotalBytes,
-            dryRun: !apply
-        )
+        let cleanupService = CleanupService(environment: environment)
+        let report: CleanupReport
+        if caches {
+            report = try cleanupService.cleanupCaches(dryRun: !apply)
+        } else {
+            report = try cleanupService.cleanupTerminalJobs(
+                store: store,
+                olderThanSeconds: olderThan,
+                keepLast: keepLast,
+                maxTotalBytes: maxTotalBytes,
+                dryRun: !apply
+            )
+        }
         if json {
             FileHandle.standardOutput.write(try jsonData(report))
+        } else if caches, report.dryRun {
+            print("Dry run: \(report.cacheCandidateCount) cache item(s) eligible for cleanup")
+            for candidate in report.cacheCandidates {
+                let bytes = candidate.bytes.map(String.init) ?? "unknown"
+                print("\(candidate.kind) \(candidate.reason) \(bytes) \(candidate.path)")
+            }
+        } else if caches {
+            print("Deleted \(report.cacheDeletedCount) cache item(s)")
         } else if report.dryRun {
             print("Dry run: \(report.candidateCount) terminal job(s) eligible for cleanup")
             for candidate in report.candidates {
@@ -523,6 +895,13 @@ public struct XCStewardApp {
     private func parseNonNegativeInteger(_ value: String, option: String) throws -> Int {
         guard let parsed = Int(value), parsed >= 0 else {
             throw XCStewardError.usage("\(option) must be a non-negative integer")
+        }
+        return parsed
+    }
+
+    private func parseWatchInterval(_ value: String) throws -> TimeInterval {
+        guard let parsed = TimeInterval(value), parsed > 0 else {
+            throw XCStewardError.usage("status --interval must be greater than 0 seconds")
         }
         return parsed
     }
@@ -607,21 +986,32 @@ public struct XCStewardApp {
         store: StateStore,
         timeout: TimeInterval,
         progress: CLIProgressReporter,
+        humanProgress: Bool,
         workerExecutableURL: URL?
     ) throws -> JobRecord {
         let deadline = Date().addingTimeInterval(timeout)
         var lastSignature: String?
         var nextHeartbeat = environment.clock.now().addingTimeInterval(5)
+        var lastHumanSignature: String?
+        var nextHumanHeartbeat = environment.clock.now().addingTimeInterval(30)
         while Date() < deadline {
             try reconcileWorkerDuringWait(store: store, workerExecutableURL: workerExecutableURL)
             if let job = try store.fetchJob(id: id) {
+                let now = environment.clock.now()
+                if humanProgress {
+                    let update = humanProgressUpdate(for: job, now: now)
+                    if update.signature != lastHumanSignature || now >= nextHumanHeartbeat {
+                        print(update.line)
+                        lastHumanSignature = update.signature
+                        nextHumanHeartbeat = now.addingTimeInterval(30)
+                    }
+                }
                 let signature = [
                     job.state.rawValue,
                     job.resultClass?.rawValue ?? "",
                     job.processID.map(String.init) ?? "",
                     job.simulatorID ?? "",
                 ].joined(separator: "|")
-                let now = environment.clock.now()
                 if signature != lastSignature || now >= nextHeartbeat {
                     progress.emit("job_status", job: job)
                     lastSignature = signature
@@ -643,6 +1033,205 @@ public struct XCStewardApp {
             progress.emit("wait_timeout", job: job)
         }
         throw XCStewardError.commandFailed("Timed out waiting for job \(id)")
+    }
+
+    private func watchStatus(
+        id: String,
+        initialJob: JobRecord,
+        store: StateStore,
+        interval: TimeInterval,
+        json: Bool
+    ) throws -> Int32 {
+        var current = initialJob
+        while true {
+            if let refreshed = try store.fetchJob(id: id) {
+                current = refreshed
+            } else {
+                throw XCStewardError.notFound("Job \(id) not found")
+            }
+            if json {
+                try writeJSONLine(loadSummary(for: current))
+            } else {
+                let update = humanProgressUpdate(for: current, now: environment.clock.now())
+                print(update.line)
+            }
+            if current.state.isTerminal {
+                return exitCode(for: current.resultClass, state: current.state)
+            }
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
+    private func followLog(for job: JobRecord, store: StateStore, path: String?) throws {
+        let logPath = path ?? combinedLogPath(for: job)
+        if !environment.fileSystem.fileExists(URL(fileURLWithPath: logPath)) {
+            print(missingCombinedLogMessage(for: job, path: logPath, following: true))
+        }
+        var offset = 0
+        var current = job
+        while true {
+            offset = try writeNewLogData(path: logPath, offset: offset)
+            if current.state.isTerminal {
+                _ = try writeNewLogData(path: logPath, offset: offset)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+            current = try store.fetchJob(id: job.id) ?? current
+        }
+    }
+
+    private func writeNewLogData(path: String, offset: Int) throws -> Int {
+        let url = URL(fileURLWithPath: path)
+        guard environment.fileSystem.fileExists(url) else {
+            return offset
+        }
+        let data = try environment.fileSystem.readData(from: url)
+        var offset = min(offset, data.count)
+        if data.count > offset {
+            FileHandle.standardOutput.write(data.subdata(in: offset..<data.count))
+            offset = data.count
+        }
+        return offset
+    }
+
+    private func printSubmitContext(for job: JobRecord) {
+        print("Queued job \(job.id) (\(job.state.rawValue)).")
+        print("Status: \(xcstewardCommand("status", job.id))")
+        print("Watch:  \(xcstewardCommand("status", job.id, "--watch"))")
+        print("Logs:   \(xcstewardCommand("logs", job.id))")
+        print("Follow: \(xcstewardCommand("logs", job.id, "--follow"))")
+        print("Job dir: \(job.jobDirectory)")
+    }
+
+    private func xcstewardCommand(_ arguments: String...) -> String {
+        let root = shellWord(environment.paths.stateRoot.path)
+        return (["xcsteward", "--state-root", root] + arguments.map(shellWord(_:))).joined(separator: " ")
+    }
+
+    private func humanProgressUpdate(for job: JobRecord, now: Date) -> HumanProgressUpdate {
+        let summary = try? loadSummary(for: job)
+        let artifacts = summary?.artifacts ?? JobSummaryFactory().fallbackSummary(job: job).artifacts
+        let commandProgress = humanCommandProgress(path: artifacts.commandEvents)
+        let elapsed = max(0, now.timeIntervalSince1970 - job.createdAt)
+        var parts = ["\(job.state.rawValue) \(formatDuration(elapsed))"]
+        if let simulatorID = job.simulatorID ?? summary?.simulatorID {
+            parts.append("simulator \(simulatorID)")
+        }
+        if let activePhase = commandProgress.activePhase {
+            parts.append(activePhase)
+        }
+        if let timestamp = commandProgress.lastEventTimestamp {
+            let age = max(0, now.timeIntervalSince1970 - timestamp)
+            parts.append("last event \(formatDuration(age)) ago")
+        }
+        if let combinedLog = artifacts.combinedLog {
+            let logStatus = environment.fileSystem.fileExists(URL(fileURLWithPath: combinedLog))
+                ? "log"
+                : (job.state.isTerminal ? "log missing" : "log pending")
+            parts.append("\(logStatus) \(combinedLog)")
+        }
+        if job.state.isTerminal, let summary {
+            if let resultClass = summary.resultClass {
+                parts.append("result \(resultClass.rawValue)")
+            }
+            parts.append(summaryLineOneLine(summary.summaryLine))
+        }
+        let signature = [
+            job.state.rawValue,
+            job.resultClass?.rawValue ?? "",
+            job.simulatorID ?? summary?.simulatorID ?? "",
+            commandProgress.activePhase ?? "",
+            commandProgress.lastEventName ?? "",
+            commandProgress.lastEventTimestamp.map { String($0) } ?? "",
+            artifacts.combinedLog.map { environment.fileSystem.fileExists(URL(fileURLWithPath: $0)) ? "log" : "log-missing" } ?? "",
+            summary?.summaryLine ?? "",
+        ].joined(separator: "|")
+        return HumanProgressUpdate(line: parts.joined(separator: " | "), signature: signature)
+    }
+
+    private func humanCommandProgress(path: String?) -> HumanCommandProgress {
+        guard let path else {
+            return HumanCommandProgress(activePhase: nil, lastEventTimestamp: nil, lastEventName: nil)
+        }
+        let url = URL(fileURLWithPath: path)
+        guard environment.fileSystem.fileExists(url),
+              let data = try? environment.fileSystem.readData(from: url),
+              let text = String(data: data, encoding: .utf8) else {
+            return HumanCommandProgress(activePhase: nil, lastEventTimestamp: nil, lastEventName: nil)
+        }
+        let decoder = JSONDecoder()
+        var lastEvent: RunCommandEvent?
+        var activeEvents: [String: RunCommandEvent] = [:]
+        for line in text.split(separator: "\n") {
+            guard let event = try? decoder.decode(RunCommandEvent.self, from: Data(line.utf8)) else {
+                continue
+            }
+            lastEvent = event
+            let key = "\(event.phase ?? "")|\(event.tool)|\(event.commandLine)"
+            switch event.event {
+            case "launching", "started":
+                activeEvents[key] = event
+            case "finished", "failed":
+                activeEvents.removeValue(forKey: key)
+            default:
+                break
+            }
+        }
+        let active = activeEvents.values.sorted { $0.timestamp < $1.timestamp }.last
+        return HumanCommandProgress(
+            activePhase: active?.phase ?? active?.tool,
+            lastEventTimestamp: lastEvent?.timestamp,
+            lastEventName: lastEvent?.event
+        )
+    }
+
+    private func missingCombinedLogMessage(for job: JobRecord, path: String?, following: Bool = false) -> String {
+        let location = path.map { " at \($0)" } ?? ""
+        let prefix = following
+            ? "Combined log is not available yet for job \(job.id)\(location); waiting."
+            : "Combined log is not available yet for job \(job.id)\(location)."
+        let state = "Current state: \(job.state.rawValue)."
+        let context = job.state.isTerminal
+            ? "The job is terminal, so inspect status, artifacts, and command events for pre-log failure evidence."
+            : "The job may still be queued or in simulator/bootstrap setup before xcodebuild writes logs."
+        return "\(prefix) \(state) \(context) Status: \(xcstewardCommand("status", job.id, "--watch"))"
+    }
+
+    private func combinedLogPath(for job: JobRecord) -> String {
+        URL(fileURLWithPath: job.jobDirectory).appendingPathComponent("logs/combined.log").path
+    }
+
+    private func summaryLineOneLine(_ text: String) -> String {
+        let compact = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard compact.count > 240 else {
+            return compact
+        }
+        return "\(compact.prefix(240))..."
+    }
+
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(seconds.rounded(.down)))
+        if totalSeconds < 60 {
+            return "\(totalSeconds)s"
+        }
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        if minutes < 60 {
+            return "\(minutes)m\(String(format: "%02d", seconds))s"
+        }
+        let hours = minutes / 60
+        return "\(hours)h\(String(format: "%02d", minutes % 60))m"
+    }
+
+    private func writeJSONLine<T: Encodable>(_ value: T) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        FileHandle.standardOutput.write(try encoder.encode(value))
+        FileHandle.standardOutput.write(Data("\n".utf8))
     }
 
     private func reconcileWorkerDuringWait(store: StateStore, workerExecutableURL: URL?) throws {
@@ -818,6 +1407,448 @@ public struct XCStewardApp {
         try environment.fileSystem.appendData(Data("\(summary.summaryLine)\n".utf8), to: paths.combinedLog)
     }
 
+    private func explainDocument(for summary: JobSummary) -> ExplainDocument {
+        var warnings: [String] = []
+        let failedTests = failedTests(from: summary.artifacts.junit, warnings: &warnings)
+        let buildIssues = buildIssues(from: summary.artifacts.buildLog, warnings: &warnings)
+        let logExcerpts = logExcerpts(from: summary.artifacts, warnings: &warnings)
+        let retryPolicy = explainRetryPolicy(for: summary)
+        return ExplainDocument(
+            jobID: summary.jobID,
+            project: summary.project,
+            state: summary.state,
+            resultClass: summary.resultClass,
+            exitCode: summary.exitCode,
+            summaryLine: summary.summaryLine,
+            retryPolicy: retryPolicy,
+            recommendedAction: recommendedAction(for: summary, retryPolicy: retryPolicy),
+            artifacts: summary.artifacts,
+            failedTests: failedTests,
+            buildIssues: buildIssues,
+            logExcerpts: logExcerpts,
+            warnings: warnings,
+            summary: summary
+        )
+    }
+
+    private func explainRetryPolicy(for summary: JobSummary) -> ExplainRetryPolicy {
+        guard summary.state.isTerminal else {
+            return ExplainRetryPolicy(
+                autoRetry: false,
+                maxAutoRetries: 0,
+                reason: "Job has not reached a terminal state."
+            )
+        }
+        switch summary.resultClass {
+        case .success:
+            return ExplainRetryPolicy(autoRetry: false, maxAutoRetries: 0, reason: "Job succeeded.")
+        case .buildFailure, .testFailure:
+            return ExplainRetryPolicy(autoRetry: false, maxAutoRetries: 0, reason: "Product or test failure; inspect evidence before changing code.")
+        case .buildTimeout, .testTimeout:
+            return ExplainRetryPolicy(autoRetry: true, maxAutoRetries: 1, reason: "Timeouts may be retryable once, then should be investigated as flakiness or capacity trouble.")
+        case .runnerBootstrapFailure:
+            if SimulatorBootstrapFailureDiagnosis.matches(summary.summaryLine) {
+                return ExplainRetryPolicy(autoRetry: true, maxAutoRetries: 1, reason: "Environment failure before XCTest attached; remediate simulator bootstrap state and retry once.")
+            }
+            return ExplainRetryPolicy(autoRetry: true, maxAutoRetries: 1, reason: "Infrastructure or artifact failure; run doctor and inspect evidence before retrying.")
+        case .artifactFailure:
+            return ExplainRetryPolicy(autoRetry: true, maxAutoRetries: 1, reason: "Infrastructure or artifact failure; run doctor and inspect evidence before retrying.")
+        case .canceled:
+            return ExplainRetryPolicy(autoRetry: false, maxAutoRetries: 0, reason: "Job was canceled; retry only if the cancellation was incidental.")
+        case .internalError, .unsupportedDestination:
+            return ExplainRetryPolicy(autoRetry: false, maxAutoRetries: 0, reason: "XCSteward or profile configuration issue; inspect diagnostics before retrying.")
+        case nil:
+            return ExplainRetryPolicy(autoRetry: false, maxAutoRetries: 0, reason: "Terminal job has no result class; report with full summary and artifacts.")
+        }
+    }
+
+    private func recommendedAction(for summary: JobSummary, retryPolicy: ExplainRetryPolicy) -> String {
+        guard summary.state.isTerminal else {
+            return "Wait for the job to finish, then run explain again."
+        }
+        switch summary.resultClass {
+        case .success:
+            return "Report success and include useful artifact paths if the user needs evidence."
+        case .buildFailure:
+            return "Inspect build issues and build log; do not blind-retry."
+        case .testFailure:
+            return "Inspect failed tests, JUnit, .xcresult, and test log; do not blind-retry."
+        case .buildTimeout, .testTimeout:
+            return "Retry at most once, then investigate timeout evidence and host capacity."
+        case .runnerBootstrapFailure:
+            if SimulatorBootstrapFailureDiagnosis.matches(summary.summaryLine) {
+                return "\(SimulatorBootstrapFailureDiagnosis.preXCTestMessage) \(SimulatorBootstrapFailureDiagnosis.remediationHint(simulatorID: summary.simulatorID))"
+            }
+            return "Inspect artifacts, run xcsteward doctor --json, fix environment issues, then retry if appropriate."
+        case .artifactFailure:
+            return "Inspect artifacts, run xcsteward doctor --json, fix environment issues, then retry if appropriate."
+        case .canceled:
+            return "Report cancellation; submit a fresh job only if cancellation was incidental."
+        case .internalError, .unsupportedDestination:
+            return "Report with artifacts and check the XCSteward profile, destination, or configuration."
+        case nil:
+            return retryPolicy.reason
+        }
+    }
+
+    private func failedTests(from junitPath: String?, warnings: inout [String]) -> [ExplainFailedTest] {
+        guard let text = artifactText(path: junitPath, source: "junit", warnings: &warnings) else {
+            return []
+        }
+        return JUnitFailureExtractor.failures(from: text)
+    }
+
+    private func buildIssues(from buildLogPath: String?, warnings: inout [String]) -> [ExplainIssue] {
+        guard let text = artifactText(path: buildLogPath, source: "build_log", warnings: &warnings),
+              let buildLogPath else {
+            return []
+        }
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .compactMap { index, line -> ExplainIssue? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isBuildIssueLine(trimmed) else {
+                    return nil
+                }
+                return ExplainIssue(
+                    source: "build_log",
+                    path: buildLogPath,
+                    lineNumber: index + 1,
+                    text: trimmed
+                )
+            }
+            .prefix(20)
+            .map { $0 }
+    }
+
+    private func isBuildIssueLine(_ line: String) -> Bool {
+        guard !line.isEmpty else {
+            return false
+        }
+        return line.localizedCaseInsensitiveContains("error:")
+            || line.localizedCaseInsensitiveContains("build failed")
+            || line.localizedCaseInsensitiveContains("unable to")
+    }
+
+    private func logExcerpts(from artifacts: JobArtifacts, warnings: inout [String]) -> [ExplainLogExcerpt] {
+        [
+            ("combined_log", artifacts.combinedLog),
+            ("build_log", artifacts.buildLog),
+            ("test_log", artifacts.testLog),
+        ].compactMap { source, path in
+            logExcerpt(source: source, path: path, warnings: &warnings)
+        }
+    }
+
+    private func logExcerpt(source: String, path: String?, warnings: inout [String]) -> ExplainLogExcerpt? {
+        guard let text = artifactText(path: path, source: source, warnings: &warnings),
+              let path else {
+            return nil
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let tail = lines.suffix(40).joined(separator: "\n")
+        return ExplainLogExcerpt(
+            source: source,
+            path: path,
+            lineCount: lines.count,
+            excerpt: String(tail.suffix(8_000))
+        )
+    }
+
+    private func artifactText(path: String?, source: String, warnings: inout [String]) -> String? {
+        guard let path, !path.isEmpty else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path)
+        guard environment.fileSystem.fileExists(url) else {
+            warnings.append("\(source) path does not exist: \(path)")
+            return nil
+        }
+        do {
+            let data = try environment.fileSystem.readData(from: url)
+            guard let text = String(data: data, encoding: .utf8) else {
+                warnings.append("\(source) is not valid UTF-8: \(path)")
+                return nil
+            }
+            return text
+        } catch {
+            warnings.append("Unable to read \(source) at \(path): \(error)")
+            return nil
+        }
+    }
+
+    private func projectListDocument() throws -> ProjectListDocument {
+        let loader = ProfileLoader(environment: environment)
+        let profileURLs = try environment.fileSystem.contentsOfDirectory(environment.paths.projectsRoot)
+            .filter { $0.pathExtension == "toml" && environment.fileSystem.isRegularFile($0) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let projects = profileURLs.map { url in
+            projectReferenceDocument(url: url, loader: loader)
+        }
+        return ProjectListDocument(
+            stateRoot: environment.paths.stateRoot.path,
+            projectsRoot: environment.paths.projectsRoot.path,
+            projects: projects
+        )
+    }
+
+    private func projectReferenceDocument(url: URL, loader: ProfileLoader) -> ProjectReferenceDocument {
+        let name = url.deletingPathExtension().lastPathComponent
+        do {
+            let profile = try loader.loadProfile(named: name)
+            return ProjectReferenceDocument(
+                name: name,
+                path: url.path,
+                loadStatus: "valid",
+                errorCode: nil,
+                errorMessage: nil,
+                repoRoot: profile.repoRoot,
+                projectPath: profile.projectPath,
+                workspacePath: profile.workspacePath,
+                scheme: profile.scheme
+            )
+        } catch {
+            return ProjectReferenceDocument(
+                name: name,
+                path: url.path,
+                loadStatus: "invalid",
+                errorCode: errorCode(for: error),
+                errorMessage: String(describing: error),
+                repoRoot: nil,
+                projectPath: nil,
+                workspacePath: nil,
+                scheme: nil
+            )
+        }
+    }
+
+    private func profilePath(for name: String) -> URL {
+        environment.paths.projectsRoot.appendingPathComponent("\(name).toml")
+    }
+
+    private func absoluteURL(path: String) -> URL {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return URL(fileURLWithPath: path, relativeTo: cwd).standardizedFileURL
+    }
+
+    private func profileName(explicitName: String?, repoRoot: URL) throws -> String {
+        let name = (explicitName ?? repoRoot.lastPathComponent)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != ".", name != ".." else {
+            throw XCStewardError.usage("profile init requires a non-empty profile name")
+        }
+        guard name.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\")) == nil else {
+            throw XCStewardError.usage("profile init profile name must not contain path separators")
+        }
+        return name
+    }
+
+    private func detectProfile(repoRoot: URL, explicitScheme: String?) throws -> DetectedProfileTarget {
+        let detected = try detectBuildContainer(repoRoot: repoRoot)
+        let containerURL = repoRoot.appendingPathComponent(detected.containerPath)
+        let result = try environment.toolRunner.run(
+            tool: "xcodebuild",
+            arguments: [detected.containerKey == "workspace_path" ? "-workspace" : "-project", containerURL.path, "-list", "-json"],
+            environment: environment.processInfo.environment,
+            workingDirectory: repoRoot,
+            timeout: 60
+        )
+        guard result.exitCode == 0, !result.timedOut else {
+            throw XCStewardError.commandFailed("profile init --detect could not list Xcode schemes for \(containerURL.path): \(result.output)")
+        }
+        let schemes = availableSchemes(from: result.output)
+        guard !schemes.isEmpty else {
+            throw XCStewardError.invalidConfiguration("profile init --detect found no shared schemes in \(containerURL.path)")
+        }
+        let scheme = try chooseScheme(
+            availableSchemes: schemes,
+            explicitScheme: explicitScheme,
+            preferredName: containerURL.deletingPathExtension().lastPathComponent
+        )
+        return DetectedProfileTarget(
+            containerKey: detected.containerKey,
+            containerPath: detected.containerPath,
+            scheme: scheme,
+            availableSchemes: schemes
+        )
+    }
+
+    private func detectBuildContainer(repoRoot: URL) throws -> (containerKey: String, containerPath: String) {
+        let entries = try environment.fileSystem.contentsOfDirectory(repoRoot)
+        let workspaces = entries
+            .filter { $0.pathExtension == "xcworkspace" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let projects = entries
+            .filter { $0.pathExtension == "xcodeproj" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        if workspaces.count == 1 {
+            return ("workspace_path", workspaces[0].lastPathComponent)
+        }
+        if workspaces.count > 1 {
+            throw XCStewardError.invalidConfiguration("profile init --detect found multiple workspaces; pass a narrower repo root")
+        }
+        if projects.count == 1 {
+            return ("project_path", projects[0].lastPathComponent)
+        }
+        if projects.count > 1 {
+            throw XCStewardError.invalidConfiguration("profile init --detect found multiple Xcode projects; pass a narrower repo root")
+        }
+        throw XCStewardError.invalidConfiguration("profile init --detect found no .xcworkspace or .xcodeproj at \(repoRoot.path)")
+    }
+
+    private func chooseScheme(
+        availableSchemes: [String],
+        explicitScheme: String?,
+        preferredName: String
+    ) throws -> String {
+        if let explicitScheme {
+            guard availableSchemes.contains(explicitScheme) else {
+                throw XCStewardError.invalidConfiguration(
+                    "profile init --scheme '\(explicitScheme)' was not found; available schemes: \(availableSchemes.joined(separator: ", "))"
+                )
+            }
+            return explicitScheme
+        }
+        if availableSchemes.count == 1 {
+            return availableSchemes[0]
+        }
+        if availableSchemes.contains(preferredName) {
+            return preferredName
+        }
+        throw XCStewardError.invalidConfiguration(
+            "profile init --detect found multiple schemes; pass --scheme. Available schemes: \(availableSchemes.joined(separator: ", "))"
+        )
+    }
+
+    private func availableSchemes(from output: String) -> [String] {
+        guard let json = jsonObject(from: output) else {
+            return output
+                .split(separator: "\n")
+                .map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\","))
+                }
+                .filter { !$0.isEmpty }
+        }
+        if let project = json["project"] as? [String: Any],
+           let schemes = project["schemes"] as? [String] {
+            return schemes
+        }
+        if let workspace = json["workspace"] as? [String: Any],
+           let schemes = workspace["schemes"] as? [String] {
+            return schemes
+        }
+        return []
+    }
+
+    private func jsonObject(from output: String) -> [String: Any]? {
+        func parse(_ text: String) -> [String: Any]? {
+            guard let data = text.data(using: .utf8) else {
+                return nil
+            }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        if let json = parse(output) {
+            return json
+        }
+        guard let start = output.firstIndex(of: "{"),
+              let end = output.lastIndex(of: "}"),
+              start <= end else {
+            return nil
+        }
+        return parse(String(output[start...end]))
+    }
+
+    private func managedSimulatorOptions(
+        profileName: String,
+        managedName: String?,
+        deviceType: String?,
+        runtime: String?
+    ) throws -> ManagedSimulatorInitOptions? {
+        guard managedName != nil || deviceType != nil || runtime != nil else {
+            return nil
+        }
+        guard let deviceType, let runtime else {
+            throw XCStewardError.usage("profile init managed simulator options require --device-type and --runtime")
+        }
+        return ManagedSimulatorInitOptions(
+            name: managedName ?? "XCSteward \(profileName) iPhone",
+            deviceType: deviceType,
+            runtime: runtime
+        )
+    }
+
+    private func profileInitWarnings(
+        simulatorID: String?,
+        managedSimulator: ManagedSimulatorInitOptions?
+    ) -> [String] {
+        if simulatorID == nil && managedSimulator == nil {
+            return ["No simulator assignment was written; add default_simulator_id or managed_simulator settings before running submit."]
+        }
+        return []
+    }
+
+    private func profileInitNextCommands(profileName: String, hasSimulatorAssignment: Bool) -> [String] {
+        let project = shellWord(profileName)
+        var commands = [
+            "xcsteward profile show \(project) --json",
+            "xcsteward doctor --project \(project) --json --progress",
+        ]
+        if hasSimulatorAssignment {
+            commands.append("xcsteward submit --project \(project) --wait --json --progress")
+        } else {
+            commands.append("xcsteward submit --project \(project) --simulator-id <SIMULATOR-UDID> --wait --json --progress")
+        }
+        return commands
+    }
+
+    private func shellWord(_ value: String) -> String {
+        guard value.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"\\$`"))) != nil else {
+            return value
+        }
+        return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private func profileTOML(
+        repoRoot: URL,
+        detected: DetectedProfileTarget,
+        simulatorID: String?,
+        managedSimulator: ManagedSimulatorInitOptions?
+    ) -> String {
+        var lines = [
+            "repo_root = \(tomlString(repoRoot.path))",
+            "\(detected.containerKey) = \(tomlString(detected.containerPath))",
+            "scheme = \(tomlString(detected.scheme))",
+        ]
+        if let simulatorID {
+            lines.append("default_simulator_id = \(tomlString(simulatorID))")
+        }
+        if let managedSimulator {
+            lines.append("")
+            lines.append("[managed_simulator]")
+            lines.append("name = \(tomlString(managedSimulator.name))")
+            lines.append("device_type = \(tomlString(managedSimulator.deviceType))")
+            lines.append("runtime = \(tomlString(managedSimulator.runtime))")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func tomlString(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func writeSnakeCaseJSON<T: Encodable>(_ value: T) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        FileHandle.standardOutput.write(try encoder.encode(value))
+    }
+
     private func printDoctorReport(_ report: DoctorReport) {
         print(report.overallStatus.rawValue)
         for check in report.checks where check.status != .pass || check.fixed {
@@ -854,5 +1885,85 @@ public struct XCStewardApp {
             return try decodeJSON(JobSummary.self, from: environment.fileSystem.readData(from: summaryURL))
         }
         return JobSummaryFactory().fallbackSummary(job: job)
+    }
+}
+
+private final class JUnitFailureExtractor: NSObject, XMLParserDelegate {
+    private var failures: [ExplainFailedTest] = []
+    private var currentClassName: String?
+    private var currentName: String?
+    private var currentFailureKind: String?
+    private var currentFailureMessage: String?
+    private var currentFailureText = ""
+
+    static func failures(from text: String) -> [ExplainFailedTest] {
+        let extractor = JUnitFailureExtractor()
+        let parser = XMLParser(data: Data(text.utf8))
+        parser.delegate = extractor
+        _ = parser.parse()
+        return extractor.failures
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        switch elementName {
+        case "testcase":
+            currentClassName = attributeDict["classname"] ?? "XCSteward"
+            currentName = attributeDict["name"] ?? "unknown"
+        case "failure", "error":
+            guard currentName != nil else {
+                return
+            }
+            currentFailureKind = elementName
+            currentFailureMessage = attributeDict["message"]
+            currentFailureText = ""
+        default:
+            return
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if currentFailureKind != nil {
+            currentFailureText += string
+        }
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        switch elementName {
+        case "failure", "error":
+            guard let currentFailureKind,
+                  let currentName else {
+                return
+            }
+            let text = currentFailureText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = currentFailureMessage ?? (text.isEmpty ? nil : text)
+            failures.append(ExplainFailedTest(
+                className: currentClassName ?? "XCSteward",
+                name: currentName,
+                failureKind: currentFailureKind,
+                message: message
+            ))
+            self.currentFailureKind = nil
+            currentFailureMessage = nil
+            currentFailureText = ""
+        case "testcase":
+            currentClassName = nil
+            currentName = nil
+            currentFailureKind = nil
+            currentFailureMessage = nil
+            currentFailureText = ""
+        default:
+            return
+        }
     }
 }
